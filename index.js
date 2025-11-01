@@ -1,6 +1,8 @@
-// index.js — Modal-Safe Version (patched for auto-tracker button)
-// ✅ Adds support for "Add to My Tracker" button
-// ✅ All other behavior unchanged
+// index.js — Modal-safe main bot file (Phase 9 corrected)
+// ✅ Keeps /book search “Add to My Tracker” auto-add
+// ✅ Restores full /tracker button + modal functionality
+// ✅ Modern flags syntax (no deprecated ephemeral)
+// ✅ Automatically registers all commands in /commands/
 
 import "dotenv/config";
 import {
@@ -15,7 +17,7 @@ import {
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
-import { loadJSON, saveJSON, FILES } from "./utils/storage.js"; // <— added for tracker auto-save
+import { loadJSON, saveJSON, FILES } from "./utils/storage.js";
 
 const DEBUG = process.env.DEBUG === "true";
 const TOKEN = process.env.DISCORD_TOKEN || process.env.TOKEN;
@@ -43,7 +45,7 @@ const client = new Client({
 client.commands = new Collection();
 
 // ---------------------------------------------------------------------------
-// Load all commands dynamically
+// 📦 Load all command modules dynamically
 // ---------------------------------------------------------------------------
 const commandsPath = path.join(__dirname, "commands");
 const commandFiles = fs.readdirSync(commandsPath).filter((f) => f.endsWith(".js"));
@@ -71,7 +73,7 @@ if (DEBUG) {
 }
 
 // ---------------------------------------------------------------------------
-// Register commands (guild-scoped)
+// 🧩 Register commands (guild-scoped)
 // ---------------------------------------------------------------------------
 async function registerCommands() {
   try {
@@ -87,7 +89,7 @@ async function registerCommands() {
 }
 
 // ---------------------------------------------------------------------------
-// Visibility helper
+// ⚙️ Helper to determine ephemeral replies
 // ---------------------------------------------------------------------------
 function isEphemeral(commandName) {
   const privateRoots = new Set(["tracker", "my-stats"]);
@@ -96,7 +98,7 @@ function isEphemeral(commandName) {
 }
 
 // ---------------------------------------------------------------------------
-// Ready event
+// 🚀 Ready event
 // ---------------------------------------------------------------------------
 client.once(Events.ClientReady, async (c) => {
   console.log(`✅ Logged in as ${c.user.tag}`);
@@ -104,18 +106,20 @@ client.once(Events.ClientReady, async (c) => {
 });
 
 // ---------------------------------------------------------------------------
-// Interaction handler (modal-safe)
+// 🎮 Interaction handler
 // ---------------------------------------------------------------------------
 client.on(Events.InteractionCreate, async (interaction) => {
   try {
-    // 🔹 Handle button click: Add to My Tracker
+    // ---------------------------------------------------------------------
+    // 🎯 Handle “Add to My Tracker” button (from /search embeds)
+    // ---------------------------------------------------------------------
     if (interaction.isButton() && interaction.customId === "trk_add_open") {
       try {
         const embed = interaction.message.embeds?.[0];
         if (!embed) {
           return await interaction.reply({
             content: "⚠️ No book data found in the message.",
-            ephemeral: true,
+            flags: 1 << 6,
           });
         }
 
@@ -145,7 +149,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         if (exists) {
           return await interaction.reply({
             content: `⚠️ *${book.title}* is already in your tracker.`,
-            ephemeral: true,
+            flags: 1 << 6,
           });
         }
 
@@ -157,7 +161,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
           .setDescription(`**${book.title}**`)
           .setColor(0x16a34a);
 
-        await interaction.reply({ embeds: [confirm], ephemeral: true });
+        await interaction.reply({ embeds: [confirm], flags: 1 << 6 });
 
         if (DEBUG)
           console.log(
@@ -167,13 +171,15 @@ client.on(Events.InteractionCreate, async (interaction) => {
         console.error("[button error]", err);
         await interaction.reply({
           content: "⚠️ Something went wrong adding to your tracker.",
-          ephemeral: true,
+          flags: 1 << 6,
         });
       }
-      return; // stop here — no need to continue to other handlers
+      // ⚙️ NOTE: Do NOT return here. We allow other interactions (like /tracker modals) to continue.
     }
 
-    // Slash command interactions
+    // ---------------------------------------------------------------------
+    // 💬 Slash command handling
+    // ---------------------------------------------------------------------
     if (interaction.isChatInputCommand()) {
       const command = client.commands.get(interaction.commandName);
       if (!command) {
@@ -186,7 +192,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
       const ephemeral = isEphemeral(interaction.commandName);
       const flags = ephemeral ? 1 << 6 : undefined;
 
-      // 🚫 Skip deferReply for modal-based commands (like /tracker)
+      // /tracker runs modals, so we don’t defer to avoid blocking
       if (interaction.commandName === "tracker") {
         await command.execute(interaction);
       } else {
@@ -201,7 +207,9 @@ client.on(Events.InteractionCreate, async (interaction) => {
       return;
     }
 
-    // Buttons / Select menus (non-tracker)
+    // ---------------------------------------------------------------------
+    // 🎛️ Generic Button + Select Menu handler
+    // ---------------------------------------------------------------------
     if (interaction.isButton() || interaction.isStringSelectMenu()) {
       for (const mod of client.commands.values()) {
         if (mod.handleComponent) await mod.handleComponent(interaction);
@@ -210,7 +218,9 @@ client.on(Events.InteractionCreate, async (interaction) => {
       return;
     }
 
-    // Modal submissions
+    // ---------------------------------------------------------------------
+    // 📝 Modal submit handler
+    // ---------------------------------------------------------------------
     if (interaction.isModalSubmit()) {
       for (const mod of client.commands.values()) {
         if (mod.handleModalSubmit) await mod.handleModalSubmit(interaction);
@@ -239,6 +249,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
 });
 
 // ---------------------------------------------------------------------------
-// Login
+// 🔑 Login
 // ---------------------------------------------------------------------------
 client.login(TOKEN);
