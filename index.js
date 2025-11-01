@@ -1,5 +1,6 @@
 // index.js — Bookcord Phase 8 Classic + QoL Merge
 // ✅ Hybrid visibility (public vs private)
+// ✅ Uses utils/commandVisibility.js for automatic handling
 // ✅ Auto-registers commands per guild
 // ✅ Keep-alive server for Railway/Render
 // ✅ Clean logging & error handling
@@ -16,6 +17,7 @@ import fs from "node:fs/promises";
 import http from "node:http";
 import path from "node:path";
 import { ensureDataFiles } from "./utils/storage.js";
+import { isEphemeral } from "./utils/commandVisibility.js";
 
 // === ENV ===
 const { DISCORD_TOKEN, CLIENT_ID, GUILD_ID, PORT, DEBUG } = process.env;
@@ -94,15 +96,7 @@ client.once("ready", async () => {
 client.on("interactionCreate", async (interaction) => {
   if (!interaction.isChatInputCommand()) return;
 
-  // Define which commands should be private
-  const privateCommands = [
-    "tracker",
-    "my-stats",
-    "my-quotes",
-    "schedule-add",
-    "schedule-remove",
-  ];
-  const ephemeral = privateCommands.includes(interaction.commandName);
+  const ephemeral = isEphemeral(interaction.commandName);
 
   try {
     await interaction.deferReply({ ephemeral });
@@ -123,12 +117,14 @@ client.on("interactionCreate", async (interaction) => {
           ephemeral: true,
         });
     }
+
+    if (DEBUG)
+      console.log(
+        `[interaction:${interaction.commandName}] executed by ${interaction.user.username} (${ephemeral ? "private" : "public"})`
+      );
   } catch (err) {
     console.error(`[interaction:${interaction.commandName}]`, err);
-    const msg = {
-      content: "⚠️ Something went wrong. Please try again.",
-      ephemeral: true,
-    };
+    const msg = { content: "⚠️ Something went wrong.", ephemeral: true };
     if (interaction.deferred || interaction.replied)
       await interaction.editReply(msg);
     else await interaction.reply(msg);
@@ -139,7 +135,6 @@ client.on("interactionCreate", async (interaction) => {
 client.on("interactionCreate", async (i) => {
   if (!i.isButton() && !i.isModalSubmit() && !i.isStringSelectMenu()) return;
   try {
-    // Tracker handles all of its own component logic
     if (trackerCommand.handleComponent)
       await trackerCommand.handleComponent(i);
 
