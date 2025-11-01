@@ -1,8 +1,9 @@
-// index.js — Phase 8 Modernized Core (with registration)
-// ✅ Registers slash commands (guild-scoped) on startup
-// ✅ Uses flags instead of ephemeral
-// ✅ Loads commands dynamically from /commands
-// ✅ Hybrid visibility (private/public) via isEphemeral()
+// index.js — Modal-Safe Version
+// ✅ Fixes InteractionAlreadyReplied for /tracker
+// ✅ Loads commands dynamically
+// ✅ Registers commands automatically on startup
+// ✅ Uses flags (no deprecated ephemeral)
+// ✅ Hybrid visibility + Railway DEBUG logs
 
 import "dotenv/config";
 import {
@@ -18,12 +19,14 @@ import path from "path";
 import { fileURLToPath } from "url";
 
 const DEBUG = process.env.DEBUG === "true";
-const TOKEN = process.env.DISCORD_TOKEN || process.env.TOKEN; // accept either
+const TOKEN = process.env.DISCORD_TOKEN || process.env.TOKEN;
 const CLIENT_ID = process.env.CLIENT_ID;
 const GUILD_ID = process.env.GUILD_ID;
 
 if (!TOKEN || !CLIENT_ID || !GUILD_ID) {
-  console.error("❌ Missing DISCORD_TOKEN (or TOKEN), CLIENT_ID, or GUILD_ID in env.");
+  console.error(
+    "❌ Missing DISCORD_TOKEN (or TOKEN), CLIENT_ID, or GUILD_ID in .env"
+  );
   process.exit(1);
 }
 
@@ -41,18 +44,16 @@ const client = new Client({
 client.commands = new Collection();
 
 // ---------------------------------------------------------------------------
-// Load command modules from /commands
-// Each module should export: definitions (array of toJSON()), execute(), and optional handlers
+// Load all commands dynamically
 // ---------------------------------------------------------------------------
 const commandsPath = path.join(__dirname, "commands");
-const commandFiles = fs.readdirSync(commandsPath).filter(f => f.endsWith(".js"));
-
+const commandFiles = fs.readdirSync(commandsPath).filter((f) => f.endsWith(".js"));
 const allDefinitions = [];
+
 for (const file of commandFiles) {
   const filePath = path.join(commandsPath, file);
   const mod = await import(`file://${filePath}`);
   if (mod.definitions && mod.execute) {
-    // Register by top-level command name(s)
     for (const def of mod.definitions) {
       client.commands.set(def.name, mod);
       allDefinitions.push(def);
@@ -64,88 +65,84 @@ for (const file of commandFiles) {
 
 if (DEBUG) {
   console.log(
-    `[index] Loaded ${client.commands.size} commands: ${[...client.commands.keys()].join(", ")}`
+    `[index] Loaded ${client.commands.size} commands: ${[
+      ...client.commands.keys(),
+    ].join(", ")}`
   );
 }
 
 // ---------------------------------------------------------------------------
-// Guild command registration
+// Register commands (guild-scoped)
 // ---------------------------------------------------------------------------
 async function registerCommands() {
   try {
     const rest = new REST({ version: "10" }).setToken(TOKEN);
-    console.log(`[register] Syncing ${allDefinitions.length} commands to guild ${GUILD_ID}...`);
+    console.log(`[register] Syncing ${allDefinitions.length} commands...`);
     await rest.put(Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID), {
       body: allDefinitions,
     });
-    console.log("[register] ✅ Guild slash commands updated.");
+    console.log("✅ Commands registered successfully.");
   } catch (err) {
-    console.error("[register] ❌ Failed to register commands:", err);
+    console.error("❌ Command registration failed:", err);
   }
 }
 
-// Allow manual registration via CLI flag
-if (process.argv.includes("--register")) {
-  await registerCommands();
-  process.exit(0);
-}
-
 // ---------------------------------------------------------------------------
-// Hybrid visibility helper
-// NOTE: `/tracker` (single command) should be private by default; `/book` is public.
-// Adjust to your taste.
+// Visibility helper
 // ---------------------------------------------------------------------------
 function isEphemeral(commandName) {
-  // Private/personal dashboards; public club chatter stays visible
   const privateRoots = new Set(["tracker", "my-stats"]);
-  // Subcommand-specific privacy (example: book my-quotes)
   const privatePairs = new Set(["book my-quotes", "book quote"]);
-
-  // When the command has subcommands, Discord gives us only the root name here.
-  // We'll keep it simple: tracker + my-stats private; everything else public.
   return privateRoots.has(commandName) || privatePairs.has(commandName);
 }
 
 // ---------------------------------------------------------------------------
-// Ready
+// Ready event
 // ---------------------------------------------------------------------------
-client.once(Events.ClientReady, async c => {
+client.once(Events.ClientReady, async (c) => {
   console.log(`✅ Logged in as ${c.user.tag}`);
   await registerCommands();
 });
 
 // ---------------------------------------------------------------------------
-// Interaction handling
+// Interaction handler (modal-safe)
 // ---------------------------------------------------------------------------
-client.on(Events.InteractionCreate, async interaction => {
+client.on(Events.InteractionCreate, async (interaction) => {
   try {
-    // Slash commands
+    // Slash command interactions
     if (interaction.isChatInputCommand()) {
       const command = client.commands.get(interaction.commandName);
       if (!command) {
-        return await interaction.reply({ content: "Unknown command.", flags: 1 << 6 });
+        return await interaction.reply({
+          content: "Unknown command.",
+          flags: 1 << 6,
+        });
       }
 
       const ephemeral = isEphemeral(interaction.commandName);
       const flags = ephemeral ? 1 << 6 : undefined;
 
-      await interaction.deferReply({ flags });
-      await command.execute(interaction);
-
-      if (DEBUG) {
-        console.log(
-          `[cmd] /${interaction.commandName} by ${interaction.user.username} (${ephemeral ? "private" : "public"})`
-        );
+      // 🚫 Skip deferReply for modal-based commands (like /tracker)
+      if (interaction.commandName === "tracker") {
+        await command.execute(interaction);
+      } else {
+        await interaction.deferReply({ flags });
+        await command.execute(interaction);
       }
+
+      if (DEBUG)
+        console.log(
+          `[cmd] /${interaction.commandName} by ${interaction.user.username}`
+        );
       return;
     }
 
-    // Components (buttons, selects)
+    // Buttons / Select menus
     if (interaction.isButton() || interaction.isStringSelectMenu()) {
       for (const mod of client.commands.values()) {
         if (mod.handleComponent) await mod.handleComponent(interaction);
       }
-      if (DEBUG) console.log(`[component] ${interaction.customId} by ${interaction.user.username}`);
+      if (DEBUG) console.log(`[component] ${interaction.customId}`);
       return;
     }
 
@@ -154,18 +151,26 @@ client.on(Events.InteractionCreate, async interaction => {
       for (const mod of client.commands.values()) {
         if (mod.handleModalSubmit) await mod.handleModalSubmit(interaction);
       }
-      if (DEBUG) console.log(`[modal] ${interaction.customId} by ${interaction.user.username}`);
+      if (DEBUG) console.log(`[modal] ${interaction.customId}`);
       return;
     }
   } catch (err) {
-    console.error("[interaction] error:", err);
+    console.error("[interaction error]", err);
     try {
       if (interaction.deferred || interaction.replied) {
-        await interaction.editReply({ content: "⚠️ Something went wrong.", flags: 1 << 6 });
+        await interaction.editReply({
+          content: "⚠️ Something went wrong.",
+          flags: 1 << 6,
+        });
       } else {
-        await interaction.reply({ content: "⚠️ Something went wrong.", flags: 1 << 6 });
+        await interaction.reply({
+          content: "⚠️ Something went wrong.",
+          flags: 1 << 6,
+        });
       }
-    } catch {}
+    } catch (nested) {
+      console.error("[interaction fallback error]", nested);
+    }
   }
 });
 
