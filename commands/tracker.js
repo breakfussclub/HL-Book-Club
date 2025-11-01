@@ -1,4 +1,9 @@
-// commands/tracker.js — Phase 8 Classic + QoL (Patched for Phase 9)
+// commands/tracker.js — Phase 8 Classic + QoL (Patched for Current Repo)
+// ✅ Restores full tracker UI: list → select → modal → update
+// ✅ Uses flags (no deprecated ephemeral)
+// ✅ Compatible with latest index.js + utils structure
+// ✅ Fix: trims .setValue() to ≤100 chars to avoid ExpectedConstraintError
+
 import {
   SlashCommandBuilder,
   EmbedBuilder,
@@ -50,12 +55,14 @@ function listEmbed(username, active, selectedId = null) {
   const e = new EmbedBuilder()
     .setTitle(`📚 ${username}'s Trackers`)
     .setColor(PURPLE);
+
   if (!active.length) {
     e.setDescription(
       "You aren't tracking any books yet.\n\nClick **Add Book** below to start."
     );
     return e;
   }
+
   const lines = active
     .map((t) => {
       const sel = t.id === selectedId ? " **(selected)**" : "";
@@ -69,6 +76,7 @@ function listEmbed(username, active, selectedId = null) {
       }${done}${sel}`;
     })
     .join("\n");
+
   e.setDescription(lines);
   return e;
 }
@@ -79,13 +87,15 @@ function listComponents(active) {
     const options = active.slice(0, 25).map((t) =>
       new StringSelectMenuOptionBuilder()
         .setLabel(t.title.slice(0, 100))
-        .setValue(String(t.id).slice(0, 90)) // ✅ capped length
+        // ✅ Patch: limit value to ≤100 chars
+        .setValue(String(t.id).slice(0, 90))
         .setDescription(
           `Page ${Number(t.currentPage || 0)}${
             t.totalPages ? `/${t.totalPages}` : ""
           }`
         )
     );
+
     rows.push(
       new ActionRowBuilder().addComponents(
         new StringSelectMenuBuilder()
@@ -97,10 +107,11 @@ function listComponents(active) {
       )
     );
   }
+
   rows.push(
     new ActionRowBuilder().addComponents(
       new ButtonBuilder()
-        .setCustomId("trk_modal_open") // ✅ unique ID
+        .setCustomId("trk_add_open")
         .setLabel("Add Book")
         .setStyle(ButtonStyle.Primary)
     )
@@ -122,9 +133,7 @@ function detailEmbed(book, stats) {
           ? `${progressBarPages(cp, tp)}  **Page ${cp}/${tp}**`
           : `**Page ${cp}**`,
         stats
-          ? `📈 **${
-              tp ? Math.round(clamp(cp / tp, 0, 1) * 100) : 0
-            }% complete**`
+          ? `📈 **${tp ? Math.round(clamp(cp / tp, 0, 1) * 100) : 0}% complete**`
           : null,
         stats
           ? `🔥 **${stats.streak} day${
@@ -138,12 +147,14 @@ function detailEmbed(book, stats) {
         .filter(Boolean)
         .join("\n")
     );
+
   if (book.thumbnail) e.setThumbnail(book.thumbnail);
   e.setFooter({
     text: `Last updated ⏱ ${fmtTime(book.updatedAt || Date.now())}`,
   });
   return e;
 }
+
 function detailComponents() {
   return [
     new ActionRowBuilder().addComponents(
@@ -153,11 +164,11 @@ function detailComponents() {
         .setStyle(ButtonStyle.Primary),
       new ButtonBuilder()
         .setCustomId("trk_archive")
-        .setLabel("🗃 Archive")
+        .setLabel("🗃 Archive Tracker")
         .setStyle(ButtonStyle.Secondary),
       new ButtonBuilder()
         .setCustomId("trk_delete")
-        .setLabel("❌ Delete")
+        .setLabel("❌ Delete Tracker")
         .setStyle(ButtonStyle.Danger),
       new ButtonBuilder()
         .setCustomId("trk_back")
@@ -211,7 +222,7 @@ export async function execute(interaction) {
 // ===== Component Handler =====
 export async function handleComponent(i) {
   try {
-    if (i.isButton() && i.customId === "trk_modal_open") {
+    if (i.isButton() && i.customId === "trk_add_open") {
       const modal = new ModalBuilder()
         .setCustomId("trk_search_modal")
         .setTitle("Search for a book");
@@ -240,18 +251,19 @@ export async function handleComponent(i) {
             }`
         )
         .join("\n");
+
       const e = new EmbedBuilder()
         .setTitle("Book Search Results")
         .setColor(0x0ea5e9)
-        .setDescription(
-          lines + "\n\nSelect a book below to create a tracker."
-        );
+        .setDescription(lines + "\n\nSelect a book below to create a tracker.");
+
       const opts = results.slice(0, 25).map((b, idx) =>
         new StringSelectMenuOptionBuilder()
           .setLabel(`${b.title}`.slice(0, 100))
           .setValue(String(idx))
           .setDescription((b.authors?.join(", ") || b.source).slice(0, 100))
       );
+
       const row = new ActionRowBuilder().addComponents(
         new StringSelectMenuBuilder()
           .setCustomId("trk_search_select")
@@ -260,6 +272,7 @@ export async function handleComponent(i) {
           .setMaxValues(1)
           .setOptions(opts)
       );
+
       i.client.searchCache = i.client.searchCache || new Map();
       i.client.searchCache.set(i.user.id, results);
       await i.reply({ embeds: [e], components: [row], flags: 1 << 6 });
@@ -271,6 +284,7 @@ export async function handleComponent(i) {
       const list = i.client.searchCache?.get(i.user.id) || [];
       const book = list[idx];
       if (!book) return i.deferUpdate();
+
       const modal = new ModalBuilder()
         .setCustomId("trk_create_modal")
         .setTitle("Create a new tracker");
@@ -298,8 +312,10 @@ export async function handleComponent(i) {
       const [book] = i.client.searchCache?.get(i.user.id) || [];
       if (!book)
         return i.reply({ content: "Search expired. Try again.", flags: 1 << 6 });
+
       const page = i.fields.getTextInputValue("trk_page").trim();
       const total = i.fields.getTextInputValue("trk_total").trim();
+
       const tracked = await getUserTrackers(i.user.id);
       if (tracked.some((t) => t.id === book.id && !t.archived)) {
         await i.reply({
@@ -308,6 +324,7 @@ export async function handleComponent(i) {
         });
         return;
       }
+
       const tracker = {
         id: book.id,
         title: book.title,
@@ -319,6 +336,7 @@ export async function handleComponent(i) {
         status: "active",
         updatedAt: new Date().toISOString(),
       };
+
       tracked.unshift(tracker);
       await saveUserTrackers(i.user.id, tracked);
       await appendReadingLog(
@@ -327,6 +345,7 @@ export async function handleComponent(i) {
         tracker.currentPage,
         tracker.updatedAt
       );
+
       await i.reply({
         content: `Added **${book.title}** — starting at Page ${page}${
           total ? `/${total}` : ""
@@ -354,6 +373,7 @@ export async function handleComponent(i) {
       const book = active;
       if (!book && i.customId !== "trk_back")
         return i.reply({ content: "Tracker not found.", flags: 1 << 6 });
+
       if (i.customId === "trk_back") return renderList(i, i.user);
 
       if (i.customId === "trk_update_open") {
@@ -409,9 +429,11 @@ export async function handleComponent(i) {
       const book = all.find((t) => !t.archived);
       if (!book)
         return i.reply({ content: "Tracker not found.", flags: 1 << 6 });
+
       const prevPage = Number(book.currentPage || 0);
       const page = i.fields.getTextInputValue("upd_page").trim();
       const total = i.fields.getTextInputValue("upd_total").trim();
+
       book.currentPage = clamp(
         Number(page || 0),
         0,
@@ -419,6 +441,7 @@ export async function handleComponent(i) {
       );
       if (total) book.totalPages = Number(total);
       book.updatedAt = new Date().toISOString();
+
       await saveUserTrackers(i.user.id, all);
       await appendReadingLog(
         i.user.id,
@@ -426,6 +449,7 @@ export async function handleComponent(i) {
         book.currentPage,
         book.updatedAt
       );
+
       const delta = Number(book.currentPage) - prevPage;
       await i.reply({
         content: `✅ Updated **${book.title}** → Page ${book.currentPage}${
