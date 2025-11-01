@@ -1,6 +1,7 @@
-// commands/my-stats.js — Phase 8 Classic + QoL Merge
+// commands/my-stats.js — Phase 8 Classic + QoL Merge (Patched)
 // ✅ Displays user's reading analytics across all active books
-// ✅ Adds error safety, consistent visuals, and optional debug logs
+// ✅ Updated for Discord.js v14.16+ (uses flags instead of ephemeral)
+// ✅ Prevents InteractionAlreadyReplied errors
 
 import { SlashCommandBuilder, EmbedBuilder } from "discord.js";
 import { loadJSON, FILES } from "../utils/storage.js";
@@ -29,14 +30,16 @@ export const definitions = [
 // ===== Execute =====
 export async function execute(interaction) {
   try {
-    await interaction.deferReply({ ephemeral: true });
+    // ✅ Use flags instead of deprecated "ephemeral"
+    await interaction.deferReply({ flags: 1 << 6 });
 
     const trackers = await loadJSON(FILES.TRACKERS);
     const userTrackers =
       trackers[interaction.user.id]?.tracked?.filter((t) => !t.archived) || [];
 
     if (!userTrackers.length) {
-      return interaction.editReply({
+      // ✅ editReply (since we've already deferred)
+      return await interaction.editReply({
         content: "You have no active trackers yet. Use `/tracker` to start one.",
       });
     }
@@ -51,7 +54,9 @@ export async function execute(interaction) {
       return [
         `• **${t.title}** ${t.author ? `— *${t.author}*` : ""}`,
         `${progressBarPages(cp, tp)} Page ${cp}${tp ? `/${tp}` : ""} (${pct})`,
-        `📈 avg **${stats.avgPerDay.toFixed(1)}**/day • 🔥 **${stats.streak}d** • ⏱ ${stats.lastAt ? fmtTime(stats.lastAt) : "—"}`,
+        `📈 avg **${stats.avgPerDay.toFixed(1)}**/day • 🔥 **${stats.streak}d** • ⏱ ${
+          stats.lastAt ? fmtTime(stats.lastAt) : "—"
+        }`,
       ].join("\n");
     });
 
@@ -61,6 +66,7 @@ export async function execute(interaction) {
       .setDescription(lines.join("\n\n"))
       .setFooter({ text: `Total active trackers: ${userTrackers.length}` });
 
+    // ✅ editReply again (never reply after defer)
     await interaction.editReply({ embeds: [e] });
 
     if (DEBUG)
@@ -69,10 +75,13 @@ export async function execute(interaction) {
       );
   } catch (err) {
     console.error("[my-stats.execute]", err);
-    const msg = { content: "⚠️ Failed to load your stats.", ephemeral: true };
-    if (interaction.deferred || interaction.replied)
-      await interaction.editReply(msg);
-    else await interaction.reply(msg);
+    const msg = { content: "⚠️ Failed to load your stats.", flags: 1 << 6 };
+    try {
+      if (interaction.deferred || interaction.replied)
+        await interaction.editReply(msg);
+      else await interaction.reply(msg);
+    } catch (nested) {
+      console.error("[my-stats fallback]", nested);
+    }
   }
 }
-
