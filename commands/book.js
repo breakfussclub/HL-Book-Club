@@ -1,6 +1,7 @@
-// commands/book.js — Phase 8 Classic + QoL Merge
-// ✅ Full-feature club system (search, add, current, leaderboard, quotes, schedule)
-// ✅ Adds better error handling, consistent embeds, and DEBUG logging
+// commands/book.js — Phase 8 Classic + QoL Merge + Rich Search Card
+// ✅ Full club system (search, add, list, current, leaderboard, quotes, schedules)
+// ✅ Includes rich /book search embed (Google Books + Amazon + Add to Tracker)
+// ✅ Clean ESM exports, debug logging, and safe error handling
 
 import {
   SlashCommandBuilder,
@@ -30,7 +31,9 @@ function isMod(inter) {
 }
 
 function sortSchedules(arr = []) {
-  return [...arr].sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
+  return [...arr].sort((a, b) =>
+    a.date < b.date ? -1 : a.date > b.date ? 1 : 0
+  );
 }
 
 // ===== Slash Command Definition =====
@@ -43,7 +46,10 @@ export const definitions = [
         .setName("search")
         .setDescription("Search for a book")
         .addStringOption((o) =>
-          o.setName("query").setDescription("Title/author/ISBN").setRequired(true)
+          o
+            .setName("query")
+            .setDescription("Title/author/ISBN")
+            .setRequired(true)
         )
     )
     .addSubcommand((sc) =>
@@ -51,17 +57,25 @@ export const definitions = [
         .setName("add")
         .setDescription("Add a book to the club list")
         .addStringOption((o) =>
-          o.setName("query").setDescription("Title/author/ISBN").setRequired(true)
+          o
+            .setName("query")
+            .setDescription("Title/author/ISBN")
+            .setRequired(true)
         )
     )
     .addSubcommand((sc) => sc.setName("list").setDescription("Show recent club books"))
-    .addSubcommand((sc) => sc.setName("current").setDescription("Show the current club read"))
+    .addSubcommand((sc) =>
+      sc.setName("current").setDescription("Show the current club read")
+    )
     .addSubcommand((sc) =>
       sc
         .setName("set-club-current")
         .setDescription("Set the club current book (mods only)")
         .addStringOption((o) =>
-          o.setName("query").setDescription("Title/author/ISBN").setRequired(true)
+          o
+            .setName("query")
+            .setDescription("Title/author/ISBN")
+            .setRequired(true)
         )
     )
     .addSubcommand((sc) =>
@@ -84,7 +98,10 @@ export const definitions = [
         .setName("quote")
         .setDescription("Save a quote under your name")
         .addStringOption((o) =>
-          o.setName("text").setDescription("The quote text").setRequired(true)
+          o
+            .setName("text")
+            .setDescription("The quote text")
+            .setRequired(true)
         )
     )
     .addSubcommand((sc) =>
@@ -98,7 +115,10 @@ export const definitions = [
           o.setName("date").setDescription("YYYY-MM-DD").setRequired(true)
         )
         .addStringOption((o) =>
-          o.setName("description").setDescription("Event description").setRequired(true)
+          o
+            .setName("description")
+            .setDescription("Event description")
+            .setRequired(true)
         )
     )
     .addSubcommand((sc) =>
@@ -126,19 +146,91 @@ export async function execute(interaction) {
     // --- Search ---
     if (sub === "search") {
       const query = interaction.options.getString("query", true);
-      await interaction.deferReply();
-      const results = await hybridSearchMany(query, 5);
+      await interaction.deferReply({ ephemeral: true });
+
+      const results = await hybridSearchMany(query, 1);
       if (!results.length)
-        return interaction.editReply({ content: `No results for **${query}**.` });
+        return interaction.editReply({
+          content: `No results for **${query}**.`,
+        });
 
       const book = results[0];
+      const isbn = book.industryIdentifiers?.[0]?.identifier;
+      const amazonUrl = isbn
+        ? `https://www.amazon.com/s?k=${isbn}`
+        : `https://www.amazon.com/s?k=${encodeURIComponent(
+            book.title + " " + (book.authors?.[0] || "")
+          )}`;
+
       const e = new EmbedBuilder()
-        .setTitle(`Top Match: ${book.title}`)
         .setColor(PURPLE)
-        .setDescription(book.authors?.length ? `by ${book.authors.join(", ")}` : null);
+        .setAuthor({
+          name: "HL Book Club",
+          iconURL: interaction.client.user.displayAvatarURL(),
+        })
+        .setTitle(book.title || "Untitled")
+        .setURL(book.previewLink || null)
+        .setDescription(
+          book.description
+            ? book.description.slice(0, 400) +
+              (book.description.length > 400 ? "..." : "")
+            : "No summary available."
+        )
+        .addFields(
+          {
+            name: "Authors",
+            value: book.authors?.join(", ") || "Unknown",
+            inline: true,
+          },
+          {
+            name: "Language",
+            value: book.language?.toUpperCase() || "—",
+            inline: true,
+          },
+          {
+            name: "Page count",
+            value: book.pageCount ? String(book.pageCount) : "—",
+            inline: true,
+          }
+        )
+        .setFooter({
+          text: `${book.source || "Google Books"}${
+            book.publishedDate
+              ? ` • Published on ${book.publishedDate}`
+              : ""
+          }`,
+        });
+
       if (book.thumbnail) e.setThumbnail(book.thumbnail);
-      if (book.previewLink) e.setURL(book.previewLink);
-      return interaction.editReply({ embeds: [e] });
+
+      const row = new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+          .setLabel("View on Google Books")
+          .setStyle(ButtonStyle.Link)
+          .setURL(
+            book.previewLink ||
+              `https://www.google.com/search?q=${encodeURIComponent(
+                book.title
+              )}`
+          ),
+        new ButtonBuilder()
+          .setLabel("View on Amazon")
+          .setStyle(ButtonStyle.Link)
+          .setURL(amazonUrl),
+        new ButtonBuilder()
+          .setCustomId("trk_add_open")
+          .setLabel("Add to My Tracker")
+          .setStyle(ButtonStyle.Primary)
+      );
+
+      await interaction.editReply({
+        embeds: [e],
+        components: [row],
+      });
+
+      if (DEBUG)
+        console.log(`[book.search] Sent rich card for "${book.title}"`);
+      return;
     }
 
     // --- Add to Club ---
@@ -167,7 +259,9 @@ export async function execute(interaction) {
       const e = new EmbedBuilder()
         .setTitle(`Added to Book Club: ${book.title}`)
         .setColor(GREEN)
-        .setDescription(book.authors?.length ? `by ${book.authors.join(", ")}` : null);
+        .setDescription(
+          book.authors?.length ? `by ${book.authors.join(", ")}` : null
+        );
       if (book.thumbnail) e.setThumbnail(book.thumbnail);
       if (book.previewLink) e.setURL(book.previewLink);
       return interaction.editReply({ embeds: [e] });
@@ -177,7 +271,9 @@ export async function execute(interaction) {
     if (sub === "list") {
       const club = await loadJSON(FILES.CLUB);
       if (!club.books.length)
-        return interaction.reply({ content: "No club books yet. Use `/book add`." });
+        return interaction.reply({
+          content: "No club books yet. Use `/book add`.",
+        });
       const lines = club.books
         .slice(0, 10)
         .map(
@@ -198,14 +294,17 @@ export async function execute(interaction) {
     // --- Current Club Read ---
     if (sub === "current") {
       const club = await loadJSON(FILES.CLUB);
-      const e = new EmbedBuilder().setTitle("📌 Club Current Read").setColor(GOLD);
+      const e = new EmbedBuilder()
+        .setTitle("📌 Club Current Read")
+        .setColor(GOLD);
       if (club.clubCurrent) {
         e.setDescription(
           `**${club.clubCurrent.title}** — ${
             club.clubCurrent.authors?.join(", ") || "Unknown"
           }`
         );
-        if (club.clubCurrent.thumbnail) e.setThumbnail(club.clubCurrent.thumbnail);
+        if (club.clubCurrent.thumbnail)
+          e.setThumbnail(club.clubCurrent.thumbnail);
       } else e.setDescription("No club current set.");
       return interaction.reply({ embeds: [e] });
     }
@@ -236,7 +335,9 @@ export async function execute(interaction) {
       const e = new EmbedBuilder()
         .setTitle(`Club Current Read: ${book.title}`)
         .setColor(GOLD)
-        .setDescription(book.authors?.length ? `by ${book.authors.join(", ")}` : null);
+        .setDescription(
+          book.authors?.length ? `by ${book.authors.join(", ")}` : null
+        );
       if (book.thumbnail) e.setThumbnail(book.thumbnail);
       if (book.previewLink) e.setURL(book.previewLink);
       return interaction.editReply({ embeds: [e] });
@@ -294,7 +395,11 @@ export async function execute(interaction) {
       scores.sort((a, b) => b.pages - a.pages || b.comp - a.comp);
       const medals = ["🥇", "🥈", "🥉"];
       const label =
-        range === "week" ? "This Week" : range === "month" ? "This Month" : "All Time";
+        range === "week"
+          ? "This Week"
+          : range === "month"
+          ? "This Month"
+          : "All Time";
       const lines = scores
         .slice(0, 10)
         .map(
@@ -326,8 +431,7 @@ export async function execute(interaction) {
       const quotes = await loadJSON(FILES.QUOTES);
       const mine = [];
       for (const arr of Object.values(quotes))
-        for (const q of arr)
-          if (q.by === user.id) mine.push(q);
+        for (const q of arr) if (q.by === user.id) mine.push(q);
       if (!mine.length)
         return interaction.reply({ content: "No quotes yet.", ephemeral: true });
 
@@ -339,7 +443,10 @@ export async function execute(interaction) {
             `**${i + 1}.** “${q.text}” — *${new Date(q.at).toLocaleString()}*`
         )
         .join("\n\n");
-      const e = new EmbedBuilder().setTitle("🪶 My Quotes").setColor(PURPLE).setDescription(desc);
+      const e = new EmbedBuilder()
+        .setTitle("🪶 My Quotes")
+        .setColor(PURPLE)
+        .setDescription(desc);
       return interaction.reply({ embeds: [e], ephemeral: true });
     }
 
