@@ -12,7 +12,7 @@ import {
   TextInputStyle,
 } from "discord.js";
 import { loadJSON, saveJSON, FILES } from "../utils/storage.js";
-import { logProgress, getUserStats } from "../utils/analytics.js";
+import { logProgress } from "../utils/analytics.js";
 
 const PURPLE = 0x8b5cf6;
 
