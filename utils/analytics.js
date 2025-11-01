@@ -1,8 +1,6 @@
-// utils/analytics.js — Phase 8 Modernized
+// utils/analytics.js — Phase 8 Modernized + Compatibility Patch
 // ✅ Provides appendReadingLog, getUserLogs, calcBookStats
-// ✅ Works with new storage.js JSON structure
-// ✅ Adds DEBUG logging for Railway
-// ✅ Handles missing files gracefully
+// ✅ Adds backward-compatibility with Phase 8 tracker (streak / avgPerDay)
 
 import { loadJSON, saveJSON, FILES } from "./storage.js";
 
@@ -11,7 +9,6 @@ const DEBUG = process.env.DEBUG === "true";
 // ---------------------------------------------------------------------------
 // Helper: Format Date
 // ---------------------------------------------------------------------------
-
 function shortDate(iso) {
   return new Date(iso).toLocaleDateString("en-US", {
     month: "short",
@@ -22,16 +19,13 @@ function shortDate(iso) {
 // ---------------------------------------------------------------------------
 // 📘 appendReadingLog
 // ---------------------------------------------------------------------------
-// Adds a new log entry when user updates progress.
-// Structure: logs[userId] = [ { bookId, page, at } ]
-
-export async function appendReadingLog(userId, bookTitle, page) {
+export async function appendReadingLog(userId, bookId, page) {
   try {
     const logs = await loadJSON(FILES.READING_LOGS);
     if (!logs[userId]) logs[userId] = [];
 
     logs[userId].push({
-      bookId: bookTitle,
+      bookId,
       page,
       at: new Date().toISOString(),
     });
@@ -41,7 +35,7 @@ export async function appendReadingLog(userId, bookTitle, page) {
 
     await saveJSON(FILES.READING_LOGS, logs);
     if (DEBUG)
-      console.log(`[analytics.appendReadingLog] ${userId} → ${bookTitle} (${page})`);
+      console.log(`[analytics.appendReadingLog] ${userId} → ${bookId} (${page})`);
   } catch (err) {
     console.error("[analytics.appendReadingLog]", err);
   }
@@ -50,15 +44,13 @@ export async function appendReadingLog(userId, bookTitle, page) {
 // ---------------------------------------------------------------------------
 // 📗 getUserLogs
 // ---------------------------------------------------------------------------
-// Returns a user’s logs, optionally filtered by book title
-
-export async function getUserLogs(userId, bookTitle = null) {
+export async function getUserLogs(userId, bookId = null) {
   try {
     const logs = await loadJSON(FILES.READING_LOGS);
     const arr = logs[userId] || [];
-    if (bookTitle)
+    if (bookId)
       return arr.filter((l) =>
-        l.bookId.toLowerCase().includes(bookTitle.toLowerCase())
+        l.bookId.toLowerCase().includes(bookId.toLowerCase())
       );
     return arr;
   } catch (err) {
@@ -68,11 +60,53 @@ export async function getUserLogs(userId, bookTitle = null) {
 }
 
 // ---------------------------------------------------------------------------
-// 📙 calcBookStats
+// 📙 calcBookStats (Legacy structure expected by tracker.js)
 // ---------------------------------------------------------------------------
-// Calculates progress percentage and simple stats for embed display
+// Returns an object { streak, avgPerDay } instead of a string
 
-export function calcBookStats(entry) {
+export function calcBookStats(logs, bookId) {
+  try {
+    const entries = (logs || []).filter((l) => l.bookId === bookId);
+    if (!entries.length) return { streak: 0, avgPerDay: 0 };
+
+    const sorted = entries.sort(
+      (a, b) => new Date(a.at).getTime() - new Date(b.at).getTime()
+    );
+
+    // --- Calculate streak
+    let streak = 1;
+    let bestStreak = 1;
+    for (let i = 1; i < sorted.length; i++) {
+      const prev = new Date(sorted[i - 1].at);
+      const curr = new Date(sorted[i].at);
+      const diff = (curr - prev) / (1000 * 60 * 60 * 24);
+      if (diff <= 1.5) streak++;
+      else {
+        bestStreak = Math.max(bestStreak, streak);
+        streak = 1;
+      }
+    }
+    bestStreak = Math.max(bestStreak, streak);
+
+    // --- Calculate average pages per day
+    const totalPages = sorted.reduce((sum, l) => sum + Number(l.page || 0), 0);
+    const days =
+      (new Date(sorted.at(-1).at) - new Date(sorted[0].at)) /
+        (1000 * 60 * 60 * 24) || 1;
+    const avgPerDay = totalPages / days;
+
+    return { streak: bestStreak, avgPerDay };
+  } catch (err) {
+    console.error("[analytics.calcBookStats]", err);
+    return { streak: 0, avgPerDay: 0 };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 📒 calcBookStatsSimple (your modern summary version)
+// ---------------------------------------------------------------------------
+
+export function calcBookStatsSimple(entry) {
   if (!entry?.totalPages) return "";
   const pct = Math.min(
     100,
