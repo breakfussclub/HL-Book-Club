@@ -1,6 +1,7 @@
 // index.js — Bookcord Phase 8 Classic + QoL Merge
 // ✅ Hybrid visibility (public vs private)
 // ✅ Uses utils/commandVisibility.js for automatic handling
+// ✅ Discord.js v14.16+ compatible (uses flags instead of ephemeral)
 // ✅ Auto-registers commands per guild
 // ✅ Keep-alive server for Railway/Render
 // ✅ Clean logging & error handling
@@ -13,9 +14,7 @@ import {
   REST,
   Routes,
 } from "discord.js";
-import fs from "node:fs/promises";
 import http from "node:http";
-import path from "node:path";
 import { ensureDataFiles } from "./utils/storage.js";
 import { isEphemeral } from "./utils/commandVisibility.js";
 
@@ -97,9 +96,10 @@ client.on("interactionCreate", async (interaction) => {
   if (!interaction.isChatInputCommand()) return;
 
   const ephemeral = isEphemeral(interaction.commandName);
+  const flags = ephemeral ? 1 << 6 : undefined; // 1<<6 = EPHEMERAL flag bit
 
   try {
-    await interaction.deferReply({ ephemeral });
+    await interaction.deferReply({ flags });
 
     switch (interaction.commandName) {
       case "tracker":
@@ -114,7 +114,6 @@ client.on("interactionCreate", async (interaction) => {
       default:
         await interaction.editReply({
           content: "⚠️ Unknown command.",
-          ephemeral: true,
         });
     }
 
@@ -124,7 +123,7 @@ client.on("interactionCreate", async (interaction) => {
       );
   } catch (err) {
     console.error(`[interaction:${interaction.commandName}]`, err);
-    const msg = { content: "⚠️ Something went wrong.", ephemeral: true };
+    const msg = { content: "⚠️ Something went wrong." };
     if (interaction.deferred || interaction.replied)
       await interaction.editReply(msg);
     else await interaction.reply(msg);
@@ -144,7 +143,7 @@ client.on("interactionCreate", async (i) => {
     try {
       await i.reply({
         content: "⚠️ Something went wrong handling that component.",
-        ephemeral: true,
+        flags: 1 << 6, // ephemeral fallback
       });
     } catch {}
   }
