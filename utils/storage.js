@@ -1,62 +1,78 @@
-// utils/storage.js — Bookcord Phase 8
-// Handles reading, writing, and ensuring data JSON files exist
-import fs from 'node:fs/promises';
-import path from 'node:path';
+// utils/storage.js — Phase 8 Modernized
+// ✅ Central file registry + resilient JSON helpers
+// ✅ Works in Railway ephemeral storage environments
+// ✅ DEBUG-safe logging, auto-creates missing files
 
-const DATA_DIR = path.join(process.cwd(), 'data');
+import fs from "fs/promises";
+import path from "path";
 
-// default file paths
+const DEBUG = process.env.DEBUG === "true";
+
+// ---------------------------------------------------------------------------
+// File Paths (relative to project root /app/data or ./data)
+// ---------------------------------------------------------------------------
+
+const DATA_DIR = process.env.DATA_DIR || "./data";
+
 export const FILES = {
-  CLUB: path.join(DATA_DIR, 'club.json'),
-  TRACKERS: path.join(DATA_DIR, 'trackers.json'),
-  MEMBERS: path.join(DATA_DIR, 'members.json'),
-  QUOTES: path.join(DATA_DIR, 'quotes.json'),
-  READING_LOGS: path.join(DATA_DIR, 'readingLogs.json'),
+  CLUB: path.join(DATA_DIR, "club.json"),
+  TRACKERS: path.join(DATA_DIR, "trackers.json"),
+  READING_LOGS: path.join(DATA_DIR, "reading_logs.json"),
+  QUOTES: path.join(DATA_DIR, "quotes.json"),
+  STATS: path.join(DATA_DIR, "stats.json"),
 };
 
-// default seed data for each file
-const SEEDS = {
-  [FILES.CLUB]: { clubCurrent: null, books: [], schedules: [] },
-  [FILES.TRACKERS]: {},
-  [FILES.MEMBERS]: {},
-  [FILES.QUOTES]: {},
-  [FILES.READING_LOGS]: {},
-};
+// ---------------------------------------------------------------------------
+// Ensure file + directory exist
+// ---------------------------------------------------------------------------
 
-// ensure /data directory and JSON files exist with defaults
-export async function ensureDataFiles() {
-  await fs.mkdir(DATA_DIR, { recursive: true });
-  for (const [file, seed] of Object.entries(SEEDS)) {
-    try {
-      await fs.access(file);
-    } catch {
-      await fs.writeFile(file, JSON.stringify(seed, null, 2));
-      console.log(`[init] created ${path.basename(file)}`);
-    }
+async function ensureFileExists(filePath, defaultData = {}) {
+  try {
+    await fs.mkdir(path.dirname(filePath), { recursive: true });
+    await fs.access(filePath);
+  } catch {
+    await fs.writeFile(filePath, JSON.stringify(defaultData, null, 2));
+    if (DEBUG) console.log(`[storage] Created ${filePath}`);
   }
 }
 
-// read JSON safely
-export async function loadJSON(file) {
-  await ensureDataFiles();
-  const raw = await fs.readFile(file, 'utf8');
-  return JSON.parse(raw);
+// ---------------------------------------------------------------------------
+// loadJSON: safely read JSON file, create if missing
+// ---------------------------------------------------------------------------
+
+export async function loadJSON(filePath, defaultData = {}) {
+  try {
+    await ensureFileExists(filePath, defaultData);
+    const data = await fs.readFile(filePath, "utf8");
+    return JSON.parse(data || "{}");
+  } catch (err) {
+    console.error(`[storage.loadJSON] ${filePath}`, err);
+    return structuredClone(defaultData);
+  }
 }
 
-// write JSON safely
-export async function saveJSON(file, data) {
-  await ensureDataFiles();
-  await fs.writeFile(file, JSON.stringify(data, null, 2));
+// ---------------------------------------------------------------------------
+// saveJSON: atomic write to prevent corruption
+// ---------------------------------------------------------------------------
+
+export async function saveJSON(filePath, data) {
+  try {
+    await ensureFileExists(filePath);
+    const tmpPath = `${filePath}.tmp`;
+    await fs.writeFile(tmpPath, JSON.stringify(data, null, 2));
+    await fs.rename(tmpPath, filePath);
+    if (DEBUG) console.log(`[storage] Saved ${path.basename(filePath)}`);
+  } catch (err) {
+    console.error(`[storage.saveJSON] ${filePath}`, err);
+  }
 }
 
-// quick helper to reset (useful for debugging)
-export async function resetFile(file) {
-  const seed = SEEDS[file];
-  if (!seed) throw new Error(`Unknown file: ${file}`);
-  await fs.writeFile(file, JSON.stringify(seed, null, 2));
-}
+// ---------------------------------------------------------------------------
+// clearFile: reset a data file to empty object/array
+// ---------------------------------------------------------------------------
 
-// optional: get path constants easily
-export function getFilePaths() {
-  return FILES;
+export async function clearFile(filePath, toArray = false) {
+  const blank = toArray ? [] : {};
+  await saveJSON(filePath, blank);
+  if (DEBUG) console.log(`[storage] Cleared ${filePath}`);
 }
