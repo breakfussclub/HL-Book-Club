@@ -109,8 +109,9 @@ function listComponents(active) {
 
   rows.push(
     new ActionRowBuilder().addComponents(
+      // 🧩 changed from "trk_add_open" → "trk_modal_open"
       new ButtonBuilder()
-        .setCustomId("trk_add_open")
+        .setCustomId("trk_modal_open")
         .setLabel("Add Book")
         .setStyle(ButtonStyle.Primary)
     )
@@ -224,7 +225,8 @@ export async function execute(interaction) {
 export async function handleComponent(i) {
   try {
     // --- Add book (open search modal)
-    if (i.isButton() && i.customId === "trk_add_open") {
+    // 🧩 changed from "trk_add_open" → "trk_modal_open"
+    if (i.isButton() && i.customId === "trk_modal_open") {
       const modal = new ModalBuilder()
         .setCustomId("trk_search_modal")
         .setTitle("Search for a book");
