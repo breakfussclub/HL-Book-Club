@@ -1,5 +1,5 @@
 // utils/analytics.js — Bookcord Phase 8
-// Handles reading progress logs and simple analytics calculations
+// Handles reading progress logs and analytics calculations
 
 import { loadJSON, saveJSON, FILES } from "./storage.js";
 
@@ -13,7 +13,7 @@ export async function logProgress(userId, bookId, page) {
     at: new Date().toISOString(),
   });
 
-  // Keep only the latest 500 entries per user to prevent bloating
+  // Keep only the latest 500 entries per user
   if (logs[userId].length > 500) logs[userId].shift();
 
   await saveJSON(FILES.READING_LOGS, logs);
@@ -26,7 +26,7 @@ export async function getUserLogs(userId) {
   return logs[userId] || [];
 }
 
-// ===== Compute Basic Stats (optional helper) =====
+// ===== Compute Basic User Analytics =====
 export async function getUserAnalytics(userId) {
   const logs = await getUserLogs(userId);
   if (!logs.length) return { totalPages: 0, streak: 0 };
@@ -39,7 +39,7 @@ export async function getUserAnalytics(userId) {
     if (a.bookId === b.bookId && b.page > a.page) total += b.page - a.page;
   }
 
-  // simple streak detection (consecutive days)
+  // simple reading streak
   const days = [...new Set(logs.map(l => l.at.slice(0, 10)))].sort();
   let streak = 1;
   let maxStreak = 1;
@@ -54,4 +54,36 @@ export async function getUserAnalytics(userId) {
   }
 
   return { totalPages: total, streak: maxStreak };
+}
+
+// ===== Calculate Stats for a Specific Book =====
+export function calcBookStats(logs, bookId, totalPages = null) {
+  // Filter only logs for this book
+  const filtered = logs.filter(l => l.bookId === bookId);
+  if (!filtered.length)
+    return { pagesRead: 0, avgPerDay: 0, percentComplete: 0 };
+
+  // Sort logs by timestamp
+  filtered.sort((a, b) => new Date(a.at) - new Date(b.at));
+
+  // Total pages read
+  let pages = 0;
+  for (let i = 1; i < filtered.length; i++) {
+    const diff = filtered[i].page - filtered[i - 1].page;
+    if (diff > 0) pages += diff;
+  }
+
+  // Duration between first and last entries (days)
+  const first = new Date(filtered[0].at);
+  const last = new Date(filtered[filtered.length - 1].at);
+  const days = Math.max(1, (last - first) / 86400000);
+
+  // Calculate averages and completion
+  const avgPerDay = Math.round(pages / days);
+  const percentComplete =
+    totalPages && totalPages > 0
+      ? Math.min(100, Math.round((filtered.at(-1).page / totalPages) * 100))
+      : 0;
+
+  return { pagesRead: pages, avgPerDay, percentComplete };
 }
