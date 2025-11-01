@@ -1,9 +1,6 @@
-// index.js — Modal-Safe Version
-// ✅ Fixes InteractionAlreadyReplied for /tracker
-// ✅ Loads commands dynamically
-// ✅ Registers commands automatically on startup
-// ✅ Uses flags (no deprecated ephemeral)
-// ✅ Hybrid visibility + Railway DEBUG logs
+// index.js — Modal-Safe Version (patched for auto-tracker button)
+// ✅ Adds support for "Add to My Tracker" button
+// ✅ All other behavior unchanged
 
 import "dotenv/config";
 import {
@@ -13,10 +10,12 @@ import {
   Events,
   REST,
   Routes,
+  EmbedBuilder,
 } from "discord.js";
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
+import { loadJSON, saveJSON, FILES } from "./utils/storage.js"; // <— added for tracker auto-save
 
 const DEBUG = process.env.DEBUG === "true";
 const TOKEN = process.env.DISCORD_TOKEN || process.env.TOKEN;
@@ -109,6 +108,71 @@ client.once(Events.ClientReady, async (c) => {
 // ---------------------------------------------------------------------------
 client.on(Events.InteractionCreate, async (interaction) => {
   try {
+    // 🔹 Handle button click: Add to My Tracker
+    if (interaction.isButton() && interaction.customId === "trk_add_open") {
+      try {
+        const embed = interaction.message.embeds?.[0];
+        if (!embed) {
+          return await interaction.reply({
+            content: "⚠️ No book data found in the message.",
+            ephemeral: true,
+          });
+        }
+
+        const book = {
+          id: embed.url || embed.title,
+          title: embed.title || "Untitled",
+          authors: [],
+          pageCount: 0,
+          status: "current",
+          progress: 0,
+          addedAt: new Date().toISOString(),
+        };
+
+        const authorsField = embed.fields?.find((f) => f.name === "Authors");
+        if (authorsField && authorsField.value)
+          book.authors = authorsField.value.split(",").map((a) => a.trim());
+
+        const trackers = await loadJSON(FILES.TRACKERS);
+        if (!trackers[interaction.user.id])
+          trackers[interaction.user.id] = { tracked: [] };
+
+        const userTracker = trackers[interaction.user.id].tracked;
+        const exists = userTracker.some(
+          (b) => b.title.toLowerCase() === book.title.toLowerCase()
+        );
+
+        if (exists) {
+          return await interaction.reply({
+            content: `⚠️ *${book.title}* is already in your tracker.`,
+            ephemeral: true,
+          });
+        }
+
+        userTracker.push(book);
+        await saveJSON(FILES.TRACKERS, trackers);
+
+        const confirm = new EmbedBuilder()
+          .setTitle("✅ Added to Your Tracker")
+          .setDescription(`**${book.title}**`)
+          .setColor(0x16a34a);
+
+        await interaction.reply({ embeds: [confirm], ephemeral: true });
+
+        if (DEBUG)
+          console.log(
+            `[button] ${interaction.user.username} added "${book.title}" to tracker`
+          );
+      } catch (err) {
+        console.error("[button error]", err);
+        await interaction.reply({
+          content: "⚠️ Something went wrong adding to your tracker.",
+          ephemeral: true,
+        });
+      }
+      return; // stop here — no need to continue to other handlers
+    }
+
     // Slash command interactions
     if (interaction.isChatInputCommand()) {
       const command = client.commands.get(interaction.commandName);
@@ -137,7 +201,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
       return;
     }
 
-    // Buttons / Select menus
+    // Buttons / Select menus (non-tracker)
     if (interaction.isButton() || interaction.isStringSelectMenu()) {
       for (const mod of client.commands.values()) {
         if (mod.handleComponent) await mod.handleComponent(interaction);
