@@ -1,13 +1,1 @@
-{
-  "name": "discord-command-cleaner",
-  "version": "1.0.0",
-  "type": "module",
-  "main": "deregister-commands.js",
-  "scripts": {
-    "start": "node deregister-commands.js"
-  },
-  "dependencies": {
-    "discord.js": "^14.15.3",
-    "dotenv": "^16.4.5"
-  }
-}
+
