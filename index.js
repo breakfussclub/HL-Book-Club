@@ -1,6 +1,7 @@
-// index.js — Bookcord Phase 8 (Modular Build)
-// ✅ Uses JSON persistence, purple theme, leaderboard ranges
-// ✅ Fixed: named imports for command modules (no default export errors)
+// index.js — Bookcord Phase 8 Classic + QoL Merge
+// ✅ Keeps full-feature commands (tracker, book, my-stats)
+// ✅ Adds auto-registration, keepalive server, structured error handling
+// ✅ Ready for Railway or local deployment
 
 import 'dotenv/config';
 import {
@@ -13,13 +14,15 @@ import {
 import fs from 'node:fs/promises';
 import http from 'node:http';
 import path from 'node:path';
+import { ensureDataFiles } from './utils/storage.js';
 
 // === ENV ===
 const {
   DISCORD_TOKEN,
   CLIENT_ID,
   GUILD_ID,
-  PORT
+  PORT,
+  DEBUG
 } = process.env;
 
 if (!DISCORD_TOKEN || !CLIENT_ID || !GUILD_ID) {
@@ -27,22 +30,27 @@ if (!DISCORD_TOKEN || !CLIENT_ID || !GUILD_ID) {
   process.exit(1);
 }
 
-// === Keepalive (for Railway) ===
+// === Keepalive (for Railway / Render) ===
 const port = Number(PORT || 0);
 if (port) {
   http
     .createServer((_, res) => res.end('ok'))
-    .listen(port, () => console.log(`[http] listening on :${port}`));
+    .listen(port, () => console.log(`[http] Keepalive listening on :${port}`));
 }
 
-// === Import Command Modules (named imports) ===
+// === Ensure data directory exists ===
+await ensureDataFiles();
+
+// === Import command modules ===
 import * as trackerCommand from './commands/tracker.js';
 import * as bookCommand from './commands/book.js';
 import * as myStatsCommand from './commands/my-stats.js';
 
-// === Ensure /data folder exists ===
-const DATA_DIR = path.join(process.cwd(), 'data');
-await fs.mkdir(DATA_DIR, { recursive: true });
+const commands = [
+  ...trackerCommand.definitions,
+  ...bookCommand.definitions,
+  ...myStatsCommand.definitions
+];
 
 // === Discord Client ===
 const client = new Client({
@@ -61,29 +69,28 @@ const client = new Client({
   ]
 });
 
-// === Slash Command Registry ===
-const commands = [
-  ...trackerCommand.definitions,
-  ...bookCommand.definitions,
-  ...myStatsCommand.definitions
-];
-
+// === Command Registration ===
 async function registerCommands() {
-  const rest = new REST({ version: '10' }).setToken(DISCORD_TOKEN);
-  console.log(`[register] updating commands for guild ${GUILD_ID}...`);
-  await rest.put(
-    Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID),
-    { body: commands }
-  );
-  console.log(`[register] done.`);
+  try {
+    const rest = new REST({ version: '10' }).setToken(DISCORD_TOKEN);
+    console.log(`[register] Updating slash commands for guild ${GUILD_ID}...`);
+    await rest.put(
+      Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID),
+      { body: commands }
+    );
+    console.log('[register] Slash commands synced successfully.');
+  } catch (err) {
+    console.error('[register] Failed to register commands:', err);
+  }
 }
 
-// === Startup ===
+// Allow manual registration via CLI flag
 if (process.argv.includes('--register')) {
   await registerCommands();
   process.exit(0);
 }
 
+// === Client Ready ===
 client.once('ready', async () => {
   console.log(`[ready] Logged in as ${client.user.tag}`);
   await registerCommands();
@@ -91,32 +98,35 @@ client.once('ready', async () => {
 
 // === Slash Command Routing ===
 client.on('interactionCreate', async (interaction) => {
+  if (!interaction.isChatInputCommand()) return;
   try {
-    if (!interaction.isChatInputCommand()) return;
-
     switch (interaction.commandName) {
       case 'tracker':
-        return trackerCommand.execute(interaction);
+        return await trackerCommand.execute(interaction);
       case 'book':
-        return bookCommand.execute(interaction);
+        return await bookCommand.execute(interaction);
       case 'my-stats':
-        return myStatsCommand.execute(interaction);
+        return await myStatsCommand.execute(interaction);
       default:
         return;
     }
   } catch (err) {
-    console.error('[interaction] error', err);
-    const msg = { content: 'Something went wrong. Please try again.', ephemeral: true };
+    console.error(`[interaction:${interaction.commandName}]`, err);
+    const msg = {
+      content: '⚠️ Something went wrong. Please try again.',
+      ephemeral: true
+    };
     if (interaction.deferred || interaction.replied) await interaction.editReply(msg);
     else await interaction.reply(msg);
   }
 });
 
-// === Component Routing (buttons, modals, selects) ===
+// === Component / Modal / Menu Routing ===
 client.on('interactionCreate', async (i) => {
   if (!i.isButton() && !i.isModalSubmit() && !i.isStringSelectMenu()) return;
   try {
     if (trackerCommand.handleComponent) await trackerCommand.handleComponent(i);
+    if (DEBUG) console.log(`[component:${i.customId}] by ${i.user.username}`);
   } catch (err) {
     console.error('[component] error', err);
   }
