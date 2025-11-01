@@ -1,153 +1,148 @@
-// index.js — Bookcord Phase 8 Classic + QoL Merge
-// ✅ Hybrid visibility (public vs private)
-// ✅ Uses utils/commandVisibility.js for automatic handling
-// ✅ Discord.js v14.16+ compatible (uses flags instead of ephemeral)
-// ✅ Auto-registers commands per guild
-// ✅ Keep-alive server for Railway/Render
-// ✅ Clean logging & error handling
+// index.js — Phase 8 Modernized Core
+// ✅ Compatible with Discord.js v14.16+
+// ✅ Uses flags instead of ephemeral
+// ✅ No ensureDataFiles import (auto-created via loadJSON)
+// ✅ DEBUG logs for Railway
 
-import "dotenv/config";
 import {
   Client,
   GatewayIntentBits,
-  Partials,
-  REST,
-  Routes,
+  Collection,
+  Events,
 } from "discord.js";
-import http from "node:http";
-import { ensureDataFiles } from "./utils/storage.js";
-import { isEphemeral } from "./utils/commandVisibility.js";
+import fs from "fs";
+import path from "path";
+import { fileURLToPath } from "url";
+import dotenv from "dotenv";
 
-// === ENV ===
-const { DISCORD_TOKEN, CLIENT_ID, GUILD_ID, PORT, DEBUG } = process.env;
+dotenv.config();
 
-if (!DISCORD_TOKEN || !CLIENT_ID || !GUILD_ID) {
-  console.error("❌ Missing DISCORD_TOKEN, CLIENT_ID, or GUILD_ID in .env");
-  process.exit(1);
-}
+const DEBUG = process.env.DEBUG === "true";
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
-// === Keep-alive (for Railway / Render) ===
-const port = Number(PORT || 0);
-if (port) {
-  http
-    .createServer((_, res) => res.end("ok"))
-    .listen(port, () => console.log(`[http] Keep-alive listening on :${port}`));
-}
-
-// === Ensure data directory exists ===
-await ensureDataFiles();
-
-// === Import command modules ===
-import * as trackerCommand from "./commands/tracker.js";
-import * as bookCommand from "./commands/book.js";
-import * as myStatsCommand from "./commands/my-stats.js";
-
-const commands = [
-  ...trackerCommand.definitions,
-  ...bookCommand.definitions,
-  ...myStatsCommand.definitions,
-];
-
-// === Discord Client ===
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildMessages,
     GatewayIntentBits.MessageContent,
-    GatewayIntentBits.GuildMessageReactions,
-  ],
-  partials: [
-    Partials.Message,
-    Partials.Channel,
-    Partials.Reaction,
-    Partials.User,
-    Partials.GuildMember,
   ],
 });
 
-// === Command Registration ===
-async function registerCommands() {
-  try {
-    const rest = new REST({ version: "10" }).setToken(DISCORD_TOKEN);
-    console.log(`[register] Updating slash commands for guild ${GUILD_ID}...`);
-    await rest.put(Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID), {
-      body: commands,
-    });
-    console.log("[register] Slash commands synced successfully.");
-  } catch (err) {
-    console.error("[register] Failed to register commands:", err);
+client.commands = new Collection();
+
+// ---------------------------------------------------------------------------
+// Command Loader
+// ---------------------------------------------------------------------------
+
+const commandsPath = path.join(__dirname, "commands");
+const commandFiles = fs
+  .readdirSync(commandsPath)
+  .filter((file) => file.endsWith(".js"));
+
+for (const file of commandFiles) {
+  const filePath = path.join(commandsPath, file);
+  const command = await import(`file://${filePath}`);
+  if (command.definitions && command.execute) {
+    for (const def of command.definitions) {
+      client.commands.set(def.name, command);
+    }
   }
 }
 
-// Allow manual registration via CLI flag
-if (process.argv.includes("--register")) {
-  await registerCommands();
-  process.exit(0);
+if (DEBUG)
+  console.log(
+    `[index] Loaded ${client.commands.size} commands: ${[
+      ...client.commands.keys(),
+    ].join(", ")}`
+  );
+
+// ---------------------------------------------------------------------------
+// Utility: Determine hybrid visibility (ephemeral vs. public)
+// ---------------------------------------------------------------------------
+
+function isEphemeral(commandName) {
+  const ephemeralCommands = [
+    "tracker",
+    "my-stats",
+    "book quote",
+    "book my-quotes",
+  ];
+  return ephemeralCommands.some((c) => commandName.startsWith(c));
 }
 
-// === Client Ready ===
-client.once("ready", async () => {
-  console.log(`[ready] Logged in as ${client.user.tag}`);
-  await registerCommands();
+// ---------------------------------------------------------------------------
+// Bot Ready
+// ---------------------------------------------------------------------------
+
+client.once(Events.ClientReady, (c) => {
+  console.log(`✅ Logged in as ${c.user.tag}`);
 });
 
-// === Hybrid Visibility Command Handling ===
-client.on("interactionCreate", async (interaction) => {
-  if (!interaction.isChatInputCommand()) return;
+// ---------------------------------------------------------------------------
+// Interaction Handler
+// ---------------------------------------------------------------------------
 
-  const ephemeral = isEphemeral(interaction.commandName);
-  const flags = ephemeral ? 1 << 6 : undefined; // 1<<6 = EPHEMERAL flag bit
-
+client.on(Events.InteractionCreate, async (interaction) => {
   try {
-    await interaction.deferReply({ flags });
-
-    switch (interaction.commandName) {
-      case "tracker":
-        await trackerCommand.execute(interaction);
-        break;
-      case "book":
-        await bookCommand.execute(interaction);
-        break;
-      case "my-stats":
-        await myStatsCommand.execute(interaction);
-        break;
-      default:
-        await interaction.editReply({
-          content: "⚠️ Unknown command.",
+    // Slash command
+    if (interaction.isChatInputCommand()) {
+      const command = client.commands.get(interaction.commandName);
+      if (!command)
+        return await interaction.reply({
+          content: "Unknown command.",
+          flags: 1 << 6,
         });
+
+      // Hybrid reply logic
+      const ephemeral = isEphemeral(interaction.commandName);
+      const flags = ephemeral ? 1 << 6 : undefined;
+
+      // Defer to show “thinking...” while executing
+      await interaction.deferReply({ flags });
+
+      // Execute command
+      await command.execute(interaction);
+      return;
     }
 
-    if (DEBUG)
-      console.log(
-        `[interaction:${interaction.commandName}] executed by ${interaction.user.username} (${ephemeral ? "private" : "public"})`
-      );
-  } catch (err) {
-    console.error(`[interaction:${interaction.commandName}]`, err);
-    const msg = { content: "⚠️ Something went wrong." };
-    if (interaction.deferred || interaction.replied)
-      await interaction.editReply(msg);
-    else await interaction.reply(msg);
-  }
-});
+    // Component (button, select menu, modal)
+    if (interaction.isButton() || interaction.isSelectMenu()) {
+      for (const cmd of client.commands.values()) {
+        if (cmd.handleComponent)
+          await cmd.handleComponent(interaction);
+      }
+      return;
+    }
 
-// === Component / Modal / Menu Routing ===
-client.on("interactionCreate", async (i) => {
-  if (!i.isButton() && !i.isModalSubmit() && !i.isStringSelectMenu()) return;
-  try {
-    if (trackerCommand.handleComponent)
-      await trackerCommand.handleComponent(i);
-
-    if (DEBUG) console.log(`[component:${i.customId}] by ${i.user.username}`);
+    // Modal submission
+    if (interaction.isModalSubmit()) {
+      for (const cmd of client.commands.values()) {
+        if (cmd.handleModalSubmit)
+          await cmd.handleModalSubmit(interaction);
+      }
+    }
   } catch (err) {
-    console.error("[component] error", err);
+    console.error("[index.InteractionCreate]", err);
     try {
-      await i.reply({
-        content: "⚠️ Something went wrong handling that component.",
-        flags: 1 << 6, // ephemeral fallback
-      });
-    } catch {}
+      if (interaction.deferred || interaction.replied)
+        await interaction.editReply({
+          content: "⚠️ Something went wrong.",
+          flags: 1 << 6,
+        });
+      else
+        await interaction.reply({
+          content: "⚠️ Something went wrong.",
+          flags: 1 << 6,
+        });
+    } catch (nested) {
+      console.error("[index.errorFallback]", nested);
+    }
   }
 });
 
-// === Launch ===
-client.login(DISCORD_TOKEN);
+// ---------------------------------------------------------------------------
+// Login
+// ---------------------------------------------------------------------------
+
+client.login(process.env.TOKEN);
