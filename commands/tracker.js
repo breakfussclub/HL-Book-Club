@@ -1,20 +1,22 @@
-// commands/tracker.js — Phase 8 Classic + QoL Merge (Modernized)
-// ✅  flags-based interaction replies (Discord.js v14.16+)
-// ✅  Seamless with hybrid visibility system
-// ✅  DEBUG logs for Railway
-// ✅  Reading tracker modals + log updates retained
+// commands/tracker.js — Classic Unified Tracker (Modernized)
+// ✅ Single-command version (no subcommands)
+// ✅ Smart search + tracker integration
+// ✅ Launches modal directly from /tracker or /book search
+// ✅ Uses flags instead of ephemeral
+// ✅ DEBUG logging for Railway
 
 import {
   SlashCommandBuilder,
   EmbedBuilder,
-  ModalBuilder,
-  TextInputBuilder,
   ActionRowBuilder,
-  TextInputStyle,
   ButtonBuilder,
   ButtonStyle,
+  ModalBuilder,
+  TextInputBuilder,
+  TextInputStyle,
 } from "discord.js";
 import { loadJSON, saveJSON, FILES } from "../utils/storage.js";
+import { hybridSearchMany } from "../utils/search.js";
 import { appendReadingLog, calcBookStats } from "../utils/analytics.js";
 
 const PURPLE = 0x8b5cf6;
@@ -22,143 +24,47 @@ const GREEN = 0x16a34a;
 const RED = 0xf43f5e;
 const DEBUG = process.env.DEBUG === "true";
 
-// ---------------------------------------------------------------------------
-// Slash Command Definition
-// ---------------------------------------------------------------------------
-
 export const definitions = [
   new SlashCommandBuilder()
     .setName("tracker")
-    .setDescription("Track or update your current reading progress")
-    .addSubcommand((sc) =>
-      sc
-        .setName("start")
-        .setDescription("Start tracking a book")
-        .addStringOption((o) =>
-          o.setName("title").setDescription("Book title").setRequired(true)
-        )
-        .addIntegerOption((o) =>
-          o.setName("total").setDescription("Total pages").setRequired(true)
-        )
+    .setDescription("Track or update your reading progress")
+    .addStringOption((o) =>
+      o
+        .setName("query")
+        .setDescription("Search for a book title (optional)")
+        .setRequired(false)
     )
-    .addSubcommand((sc) =>
-      sc
-        .setName("update")
-        .setDescription("Update your progress on a tracked book")
-        .addStringOption((o) =>
-          o
-            .setName("title")
-            .setDescription("Book title (exact or partial match)")
-            .setRequired(true)
-        )
-        .addIntegerOption((o) =>
-          o
-            .setName("page")
-            .setDescription("Page number reached")
-            .setRequired(true)
-        )
-    )
-    .addSubcommand((sc) =>
-      sc
-        .setName("resume")
-        .setDescription("Show and update your current tracked books")
+    .addIntegerOption((o) =>
+      o
+        .setName("page")
+        .setDescription("Page number to update (optional)")
+        .setRequired(false)
     ),
 ].map((c) => c.toJSON());
 
-// ---------------------------------------------------------------------------
-// Execute
-// ---------------------------------------------------------------------------
-
 export async function execute(interaction) {
-  const sub = interaction.options.getSubcommand();
-  const user = interaction.user;
-  const uid = user.id;
-
   try {
-    // Load user data
+    const user = interaction.user;
+    const uid = user.id;
+    const query = interaction.options.getString("query");
+    const page = interaction.options.getInteger("page");
     const trackers = await loadJSON(FILES.TRACKERS);
     if (!trackers[uid]) trackers[uid] = { tracked: [] };
 
-    // ---------------------------------------------------------
-    // /tracker start
-    // ---------------------------------------------------------
-    if (sub === "start") {
-      const title = interaction.options.getString("title", true).trim();
-      const totalPages = interaction.options.getInteger("total", true);
-      const exists = trackers[uid].tracked.find(
-        (b) => b.title.toLowerCase() === title.toLowerCase()
-      );
-      if (exists)
-        return interaction.editReply({
-          content: `You're already tracking **${title}**.`,
-        });
-
-      trackers[uid].tracked.unshift({
-        title,
-        totalPages,
-        currentPage: 0,
-        startedAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
-      });
-      await saveJSON(FILES.TRACKERS, trackers);
-
-      const e = new EmbedBuilder()
-        .setTitle(`Started tracking "${title}"`)
-        .setColor(GREEN)
-        .setDescription(`Total pages: **${totalPages}**`);
-      await interaction.editReply({ embeds: [e] });
-      if (DEBUG) console.log(`[tracker.start] ${user.username} → ${title}`);
-      return;
-    }
-
-    // ---------------------------------------------------------
-    // /tracker update
-    // ---------------------------------------------------------
-    if (sub === "update") {
-      const title = interaction.options.getString("title", true).trim();
-      const page = interaction.options.getInteger("page", true);
-      const entry = trackers[uid].tracked.find((b) =>
-        b.title.toLowerCase().includes(title.toLowerCase())
-      );
-
-      if (!entry)
-        return interaction.editReply({
-          content: `No tracked book found matching **${title}**.`,
-        });
-
-      if (page < entry.currentPage)
-        return interaction.editReply({
-          content: `⚠️ You’re already past page ${page}.`,
-        });
-
-      entry.currentPage = Math.min(page, entry.totalPages);
-      entry.updatedAt = new Date().toISOString();
-      await saveJSON(FILES.TRACKERS, trackers);
-
-      await appendReadingLog(uid, entry.title, page);
-      const stats = calcBookStats(entry);
-
-      const e = new EmbedBuilder()
-        .setTitle(`Updated: ${entry.title}`)
-        .setColor(PURPLE)
-        .setDescription(
-          `Progress: **${entry.currentPage}/${entry.totalPages} pages**\n${stats}`
-        );
-      await interaction.editReply({ embeds: [e] });
-      if (DEBUG)
-        console.log(`[tracker.update] ${user.username} → ${entry.title} (${page})`);
-      return;
-    }
-
-    // ---------------------------------------------------------
-    // /tracker resume
-    // ---------------------------------------------------------
-    if (sub === "resume") {
+    // -------------------------------------------------------------
+    // 1️⃣ No arguments: Show current tracked books
+    // -------------------------------------------------------------
+    if (!query && !page) {
       const tracked = trackers[uid].tracked || [];
-      if (!tracked.length)
-        return interaction.editReply({
-          content: "You’re not tracking any books yet. Use `/tracker start`.",
-        });
+      if (!tracked.length) {
+        const e = new EmbedBuilder()
+          .setColor(PURPLE)
+          .setDescription(
+            "You’re not tracking any books yet.\nUse `/tracker` with a title or `/book search` to add one!"
+          );
+        await interaction.editReply({ embeds: [e] });
+        return;
+      }
 
       const lines = tracked
         .map(
@@ -168,19 +74,142 @@ export async function execute(interaction) {
         .join("\n");
 
       const e = new EmbedBuilder()
-        .setTitle("📖 Your Tracked Books")
+        .setTitle("📚 Your Reading Tracker")
         .setColor(PURPLE)
         .setDescription(lines)
-        .setFooter({ text: "Use /tracker update to modify progress" });
+        .setFooter({
+          text: "Tip: Use /tracker <title> to update progress or search again",
+        });
 
       await interaction.editReply({ embeds: [e] });
-      if (DEBUG) console.log(`[tracker.resume] by ${user.username}`);
+      if (DEBUG) console.log(`[tracker.list] ${user.username}`);
       return;
     }
 
-    await interaction.editReply({ content: "⚠️ Unknown subcommand." });
+    // -------------------------------------------------------------
+    // 2️⃣ Title but no page: Search or display book
+    // -------------------------------------------------------------
+    if (query && !page) {
+      // Try to match existing tracked book first
+      const existing = trackers[uid].tracked.find((b) =>
+        b.title.toLowerCase().includes(query.toLowerCase())
+      );
+
+      if (existing) {
+        const stats = calcBookStats(existing);
+        const e = new EmbedBuilder()
+          .setTitle(existing.title)
+          .setColor(PURPLE)
+          .setDescription(
+            `Currently on **${existing.currentPage}/${existing.totalPages}** pages\n${stats}`
+          )
+          .setFooter({ text: "Use /tracker <title> <page> to update progress" });
+        await interaction.editReply({ embeds: [e] });
+        return;
+      }
+
+      // Otherwise perform a search
+      const results = await hybridSearchMany(query, 1);
+      if (!results.length) {
+        await interaction.editReply({
+          content: `No results for **${query}**.`,
+        });
+        return;
+      }
+
+      const book = results[0];
+      const isbn = book.industryIdentifiers?.[0]?.identifier;
+      const amazonUrl = isbn
+        ? `https://www.amazon.com/s?k=${isbn}`
+        : `https://www.amazon.com/s?k=${encodeURIComponent(
+            book.title + " " + (book.authors?.[0] || "")
+          )}`;
+
+      const e = new EmbedBuilder()
+        .setColor(PURPLE)
+        .setTitle(book.title)
+        .setDescription(
+          book.description
+            ? book.description.slice(0, 400) +
+              (book.description.length > 400 ? "..." : "")
+            : "No summary available."
+        )
+        .addFields(
+          {
+            name: "Author",
+            value: book.authors?.join(", ") || "Unknown",
+            inline: true,
+          },
+          {
+            name: "Pages",
+            value: book.pageCount ? String(book.pageCount) : "—",
+            inline: true,
+          }
+        )
+        .setFooter({
+          text: `${book.source || "Google Books"}${
+            book.publishedDate ? ` • Published ${book.publishedDate}` : ""
+          }`,
+        });
+      if (book.thumbnail) e.setThumbnail(book.thumbnail);
+
+      const row = new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+          .setLabel("View on Amazon")
+          .setStyle(ButtonStyle.Link)
+          .setURL(amazonUrl),
+        new ButtonBuilder()
+          .setCustomId("trk_add_open")
+          .setLabel("Add to My Tracker")
+          .setStyle(ButtonStyle.Primary)
+      );
+
+      await interaction.editReply({ embeds: [e], components: [row] });
+      if (DEBUG) console.log(`[tracker.search] ${user.username} → ${book.title}`);
+      return;
+    }
+
+    // -------------------------------------------------------------
+    // 3️⃣ Title + page: Update progress
+    // -------------------------------------------------------------
+    if (query && page) {
+      const entry = trackers[uid].tracked.find((b) =>
+        b.title.toLowerCase().includes(query.toLowerCase())
+      );
+
+      if (!entry) {
+        await interaction.editReply({
+          content: `You’re not tracking **${query}** yet.`,
+        });
+        return;
+      }
+
+      if (page < entry.currentPage) {
+        await interaction.editReply({
+          content: `⚠️ You’re already past page ${page}.`,
+        });
+        return;
+      }
+
+      entry.currentPage = Math.min(page, entry.totalPages);
+      entry.updatedAt = new Date().toISOString();
+      await saveJSON(FILES.TRACKERS, trackers);
+      await appendReadingLog(uid, entry.title, page);
+
+      const stats = calcBookStats(entry);
+      const e = new EmbedBuilder()
+        .setTitle(entry.title)
+        .setColor(GREEN)
+        .setDescription(
+          `Updated progress: **${entry.currentPage}/${entry.totalPages} pages**\n${stats}`
+        );
+      await interaction.editReply({ embeds: [e] });
+      if (DEBUG)
+        console.log(`[tracker.update] ${user.username} → ${entry.title} (${page})`);
+      return;
+    }
   } catch (err) {
-    console.error(`[tracker.${sub}]`, err);
+    console.error("[tracker.execute]", err);
     const msg = { content: "⚠️ Something went wrong.", flags: 1 << 6 };
     if (interaction.deferred || interaction.replied)
       await interaction.editReply(msg);
@@ -189,7 +218,7 @@ export async function execute(interaction) {
 }
 
 // ---------------------------------------------------------------------------
-// Component / Modal Handler
+// Component Handler — Add to My Tracker Button
 // ---------------------------------------------------------------------------
 
 export async function handleComponent(interaction) {
