@@ -1,7 +1,7 @@
-// commands/my-stats.js — Phase 8 Classic + QoL Merge (Patched)
+// commands/my-stats.js — Phase 8 Classic + QoL Merge (Final Fixed)
 // ✅ Displays user's reading analytics across all active books
-// ✅ Updated for Discord.js v14.16+ (uses flags instead of ephemeral)
-// ✅ Prevents InteractionAlreadyReplied errors
+// ✅ Compatible with index.js auto-defer (no duplicate replies)
+// ✅ Fully Discord.js v14.16+ safe
 
 import { SlashCommandBuilder, EmbedBuilder } from "discord.js";
 import { loadJSON, FILES } from "../utils/storage.js";
@@ -30,15 +30,13 @@ export const definitions = [
 // ===== Execute =====
 export async function execute(interaction) {
   try {
-    // ✅ Use flags instead of deprecated "ephemeral"
-    await interaction.deferReply({ flags: 1 << 6 });
+    // ❌ Removed deferReply — already handled by index.js
 
     const trackers = await loadJSON(FILES.TRACKERS);
     const userTrackers =
       trackers[interaction.user.id]?.tracked?.filter((t) => !t.archived) || [];
 
     if (!userTrackers.length) {
-      // ✅ editReply (since we've already deferred)
       return await interaction.editReply({
         content: "You have no active trackers yet. Use `/tracker` to start one.",
       });
@@ -66,7 +64,6 @@ export async function execute(interaction) {
       .setDescription(lines.join("\n\n"))
       .setFooter({ text: `Total active trackers: ${userTrackers.length}` });
 
-    // ✅ editReply again (never reply after defer)
     await interaction.editReply({ embeds: [e] });
 
     if (DEBUG)
@@ -85,3 +82,4 @@ export async function execute(interaction) {
     }
   }
 }
+
