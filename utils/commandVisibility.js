@@ -1,32 +1,29 @@
-// utils/commandVisibility.js — Centralized Visibility Rules (Phase 10 HL Book Club)
+// utils/commandVisibility.js — Centralized Visibility Rules (Updated)
 // ✅ Handles ephemeral (private) vs public command responses
-// ✅ Ensures HL Book Club behavior is consistent across modules
+// ✅ Now reads from config.js
+// ✅ Includes admin command
 
-// ---------------------------------------------------------------------------
-// Private commands — replies are visible only to the user
-// ---------------------------------------------------------------------------
-const DEFAULT_PRIVATE = [
+import { config } from "../config.js";
+
+// Use config values if available, otherwise fall back to defaults
+const DEFAULT_PRIVATE = config.commands?.private || [
   "tracker",
   "my-stats",
   "quote",
   "my-quotes",
+  "admin", // Admin command is always private
 ];
 
-// ---------------------------------------------------------------------------
-// Public commands — visible in the channel for social / club engagement
-// ---------------------------------------------------------------------------
-const DEFAULT_PUBLIC = [
+const DEFAULT_PUBLIC = config.commands?.public || [
   "search",
   "leaderboard",
   "show-quotes",
-  "profile",   // 🆕 Phase 10: public profile view
-  "shelf",     // 🆕 Phase 10: public community bookshelf
+  "profile",
+  "shelf",
+  "book",
 ];
 
-// ---------------------------------------------------------------------------
 // Optional overrides for future flexibility
-// Example: VISIBILITY_OVERRIDES["profile"] = true // force private
-// ---------------------------------------------------------------------------
 const VISIBILITY_OVERRIDES = {};
 
 /**
