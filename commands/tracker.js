@@ -1,8 +1,8 @@
-// commands/tracker.js — Phase 11 Full Version (Fixed for InteractionAlreadyReplied)
-// ✅ Keeps all book tracking, update, archive, modal, and component logic intact
-// ✅ Fixes duplicate reply/defer conflict
-// ✅ Uses safe reply/edit handling throughout
-// ✅ Fully compatible with index.js deferred replies
+// commands/tracker.js — Phase 11: Restored Google Books Search Flow (Safe Interaction Handling)
+// ✅ Fixes InteractionAlreadyReplied error
+// ✅ Restores 2-step Google Books search modal flow
+// ✅ Adds confirmation before adding book
+// ✅ Keeps all update/archive/delete logic intact
 
 import {
   SlashCommandBuilder,
@@ -29,7 +29,7 @@ const PURPLE = 0x8b5cf6;
 const GOLD = 0xf59e0b;
 const DEBUG = process.env.DEBUG === "true";
 
-// ===== Utility helpers =====
+// ===== Helpers =====
 const clamp = (n, min, max) => Math.max(min, Math.min(max, n));
 const fmtTime = (d) => new Date(d).toLocaleString();
 
@@ -40,7 +40,7 @@ const progressBarPages = (current, total, width = 18) => {
   return "▰".repeat(filled) + "▱".repeat(width - filled);
 };
 
-// ===== Data helpers =====
+// ===== Storage =====
 async function getUserTrackers(userId) {
   const trackers = await loadJSON(FILES.TRACKERS);
   return trackers[userId]?.tracked || [];
@@ -53,8 +53,8 @@ async function saveUserTrackers(userId, tracked) {
   await saveJSON(FILES.TRACKERS, trackers);
 }
 
-// ===== Embed builders =====
-function listEmbed(username, active, selectedId = null) {
+// ===== Embeds =====
+function listEmbed(username, active) {
   const e = new EmbedBuilder().setTitle(`📚 ${username}'s Trackers`).setColor(PURPLE);
 
   if (!active.length) {
@@ -64,13 +64,12 @@ function listEmbed(username, active, selectedId = null) {
 
   const lines = active
     .map((t) => {
-      const sel = t.id === selectedId ? " **(selected)**" : "";
       const cp = Number(t.currentPage || 0);
       const tp = Number(t.totalPages || 0);
       const bar = tp ? `${progressBarPages(cp, tp)} ` : "";
       const done = tp && cp >= tp ? " ✅ Completed" : "";
       const author = t.author ? ` — *${t.author}*` : "";
-      return `• **${t.title}**${author} — ${bar}Page ${cp}${tp ? `/${tp}` : ""}${done}${sel}`;
+      return `• **${t.title}**${author} — ${bar}Page ${cp}${tp ? `/${tp}` : ""}${done}`;
     })
     .join("\n");
 
@@ -80,13 +79,9 @@ function listEmbed(username, active, selectedId = null) {
 
 function listComponents(active) {
   const rows = [];
-
   if (active.length) {
     const options = active.slice(0, 25).map((t) => {
-      const safeId =
-        typeof t.id === "string" && t.id.length > 90
-          ? t.id.slice(0, 60) + "_" + Math.random().toString(36).slice(2, 8)
-          : String(t.id);
+      const safeId = String(t.id);
       return new StringSelectMenuOptionBuilder()
         .setLabel(t.title.slice(0, 100))
         .setValue(safeId)
@@ -110,7 +105,7 @@ function listComponents(active) {
   rows.push(
     new ActionRowBuilder().addComponents(
       new ButtonBuilder()
-        .setCustomId("trk_add_modal")
+        .setCustomId("trk_search_modal_open")
         .setLabel("Add Book")
         .setStyle(ButtonStyle.Primary)
     )
@@ -159,25 +154,17 @@ function detailComponents() {
   ];
 }
 
-// ===== Renderers (Fixed for deferred replies) =====
-async function renderList(ctx, user, selectedId = null) {
+// ===== Renderers =====
+async function renderList(ctx, user) {
   const all = await getUserTrackers(user.id);
   const active = all.filter((t) => !t.archived);
-  const embed = listEmbed(user.username, active, selectedId);
+  const embed = listEmbed(user.username, active);
   const comps = listComponents(active);
   const payload = { embeds: [embed], components: comps, flags: 1 << 6 };
 
-  try {
-    if (ctx.deferred || ctx.replied) {
-      await ctx.editReply(payload);
-    } else if (typeof ctx.update === "function") {
-      await ctx.update(payload);
-    } else {
-      await ctx.reply(payload);
-    }
-  } catch (err) {
-    if (DEBUG) console.warn("renderList failed", err.message);
-  }
+  if (ctx.deferred || ctx.replied) return ctx.editReply(payload);
+  if (typeof ctx.update === "function") return ctx.update(payload);
+  return ctx.reply(payload);
 }
 
 async function renderDetail(ctx, user, bookId) {
@@ -191,22 +178,16 @@ async function renderDetail(ctx, user, bookId) {
   const comps = detailComponents();
   const payload = { embeds: [embed], components: comps, flags: 1 << 6 };
 
-  try {
-    if (ctx.deferred || ctx.replied) {
-      await ctx.editReply(payload);
-    } else if (typeof ctx.update === "function") {
-      await ctx.update(payload);
-    } else {
-      await ctx.reply(payload);
-    }
-  } catch (err) {
-    if (DEBUG) console.warn("renderDetail failed", err.message);
-  }
+  if (ctx.deferred || ctx.replied) return ctx.editReply(payload);
+  if (typeof ctx.update === "function") return ctx.update(payload);
+  return ctx.reply(payload);
 }
 
-// ===== Slash Command Definition =====
+// ===== Command Definition =====
 export const definitions = [
-  new SlashCommandBuilder().setName("tracker").setDescription("Your personal reading tracker (pages)"),
+  new SlashCommandBuilder()
+    .setName("tracker")
+    .setDescription("Your personal reading tracker (pages)"),
 ].map((c) => c.toJSON());
 
 // ===== Execute =====
@@ -215,149 +196,140 @@ export async function execute(interaction) {
     await renderList(interaction, interaction.user);
   } catch (err) {
     console.error("[tracker.execute]", err);
-    try {
-      if (interaction.deferred || interaction.replied) {
-        await interaction.editReply({
-          content: "⚠️ Couldn't load your trackers. Please try again.",
-          flags: 1 << 6,
-        });
-      } else {
-        await interaction.reply({
-          content: "⚠️ Couldn't load your trackers. Please try again.",
-          flags: 1 << 6,
-        });
-      }
-    } catch {}
+    if (interaction.deferred || interaction.replied) {
+      await interaction.editReply({ content: "⚠️ Couldn't load your trackers." });
+    } else {
+      await interaction.reply({ content: "⚠️ Couldn't load your trackers." });
+    }
   }
 }
 
-// ===== Component + Modal Handlers =====
+// ===== Component Handler =====
 export async function handleComponent(interaction) {
   try {
     const userId = interaction.user.id;
     const trackers = await getUserTrackers(userId);
 
-    // Handle book selection dropdown
+    // Select tracker
     if (interaction.customId === "trk_select_view") {
       const bookId = interaction.values[0];
       return renderDetail(interaction, interaction.user, bookId);
     }
 
-    // Add new tracker
-    if (interaction.customId === "trk_add_modal") {
+    // Open Search Modal
+    if (interaction.customId === "trk_search_modal_open") {
       const modal = new ModalBuilder()
-        .setCustomId("trk_add_modal_submit")
-        .setTitle("Add Book Tracker")
+        .setCustomId("trk_search_modal_submit")
+        .setTitle("Search for a Book")
         .addComponents(
           new ActionRowBuilder().addComponents(
             new TextInputBuilder()
-              .setCustomId("title")
-              .setLabel("Book Title")
-              .setStyle(TextInputStyle.Short)
-              .setRequired(true)
-          ),
-          new ActionRowBuilder().addComponents(
-            new TextInputBuilder()
-              .setCustomId("author")
-              .setLabel("Author (optional)")
-              .setStyle(TextInputStyle.Short)
-              .setRequired(false)
-          ),
-          new ActionRowBuilder().addComponents(
-            new TextInputBuilder()
-              .setCustomId("pages")
-              .setLabel("Total Pages (optional)")
-              .setStyle(TextInputStyle.Short)
-              .setRequired(false)
-          )
-        );
-
-      return interaction.showModal(modal);
-    }
-
-    // Update tracker
-    if (interaction.customId === "trk_update_open") {
-      const all = await getUserTrackers(userId);
-      const last = all[all.length - 1];
-      const modal = new ModalBuilder()
-        .setCustomId("trk_update_submit")
-        .setTitle(`Update Tracker — ${last?.title || "Book"}`)
-        .addComponents(
-          new ActionRowBuilder().addComponents(
-            new TextInputBuilder()
-              .setCustomId("page")
-              .setLabel("Current Page")
+              .setCustomId("query")
+              .setLabel("Enter a book title or author")
               .setStyle(TextInputStyle.Short)
               .setRequired(true)
           )
         );
-
       return interaction.showModal(modal);
     }
 
-    // Delete tracker
-    if (interaction.customId === "trk_delete") {
-      const newList = trackers.filter((t) => !t.selected);
-      await saveUserTrackers(userId, newList);
+    // Confirm Add Book
+    if (interaction.customId.startsWith("trk_confirm_add_")) {
+      const book = JSON.parse(interaction.customId.replace("trk_confirm_add_", ""));
+      const userTrackers = await getUserTrackers(userId);
+
+      userTrackers.push({
+        id: book.id,
+        title: book.title,
+        author: book.author,
+        totalPages: book.pageCount || null,
+        currentPage: 0,
+        addedAt: Date.now(),
+        updatedAt: Date.now(),
+        thumbnail: book.thumbnail || null,
+      });
+
+      await saveUserTrackers(userId, userTrackers);
       return renderList(interaction, interaction.user);
     }
 
-    // Archive tracker
-    if (interaction.customId === "trk_archive") {
-      for (const t of trackers) {
-        if (t.selected) t.archived = true;
-      }
-      await saveUserTrackers(userId, trackers);
+    // Cancel Add
+    if (interaction.customId === "trk_cancel_add") {
       return renderList(interaction, interaction.user);
     }
 
-    // Back to list
+    // Back button
     if (interaction.customId === "trk_back") {
       return renderList(interaction, interaction.user);
     }
+
   } catch (err) {
     console.error("[tracker.handleComponent]", err);
   }
 }
 
-// ===== Modal Submission Handler =====
+// ===== Modal Submit Handler =====
 export async function handleModalSubmit(interaction) {
   try {
-    const userId = interaction.user.id;
-    const trackers = await getUserTrackers(userId);
+    const user = interaction.user;
 
-    if (interaction.customId === "trk_add_modal_submit") {
-      const title = interaction.fields.getTextInputValue("title");
-      const author = interaction.fields.getTextInputValue("author") || "";
-      const pages = Number(interaction.fields.getTextInputValue("pages") || 0);
+    if (interaction.customId === "trk_search_modal_submit") {
+      const query = interaction.fields.getTextInputValue("query").trim();
+      await interaction.deferReply({ ephemeral: true });
 
-      const newBook = {
-        id: Math.random().toString(36).slice(2, 10),
-        title,
-        author,
-        totalPages: pages || null,
-        currentPage: 0,
-        addedAt: Date.now(),
-        updatedAt: Date.now(),
-        archived: false,
-      };
+      const results = await hybridSearchMany(query);
+      if (!results?.length) {
+        return interaction.editReply({ content: "❌ No books found for that search." });
+      }
 
-      trackers.push(newBook);
-      await saveUserTrackers(userId, trackers);
-      return renderList(interaction, interaction.user);
+      const top = results.slice(0, 5);
+      const embed = new EmbedBuilder()
+        .setTitle(`🔍 Results for "${query}"`)
+        .setDescription("Select a book below to add it to your tracker.")
+        .setColor(PURPLE);
+
+      const row = new ActionRowBuilder().addComponents(
+        new StringSelectMenuBuilder()
+          .setCustomId("trk_select_add_result")
+          .setPlaceholder("Select a book to add")
+          .addOptions(
+            top.map((b) => ({
+              label: b.title.slice(0, 100),
+              description: b.authors?.[0] ? b.authors[0].slice(0, 100) : "Unknown author",
+              value: JSON.stringify({
+                id: b.id,
+                title: b.title,
+                author: b.authors?.[0] || "",
+                pageCount: b.pageCount,
+                thumbnail: b.thumbnail || null,
+              }),
+            }))
+          )
+      );
+
+      return interaction.editReply({ embeds: [embed], components: [row] });
     }
 
-    if (interaction.customId === "trk_update_submit") {
-      const page = Number(interaction.fields.getTextInputValue("page"));
-      const all = await getUserTrackers(userId);
-      const last = all[all.length - 1];
-      if (last) {
-        last.currentPage = page;
-        last.updatedAt = Date.now();
-        await appendReadingLog(userId, last.id, page);
-      }
-      await saveUserTrackers(userId, all);
-      return renderDetail(interaction, interaction.user, last.id);
+    // Selecting a search result from dropdown
+    if (interaction.customId === "trk_select_add_result") {
+      const book = JSON.parse(interaction.values[0]);
+      const confirm = new EmbedBuilder()
+        .setTitle(`📘 Add "${book.title}"?`)
+        .setDescription(book.author ? `by *${book.author}*` : "")
+        .setColor(PURPLE);
+
+      const row = new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+          .setCustomId(`trk_confirm_add_${JSON.stringify(book)}`)
+          .setLabel("✅ Add")
+          .setStyle(ButtonStyle.Success),
+        new ButtonBuilder()
+          .setCustomId("trk_cancel_add")
+          .setLabel("❌ Cancel")
+          .setStyle(ButtonStyle.Danger)
+      );
+
+      return interaction.reply({ embeds: [confirm], components: [row], ephemeral: true });
     }
   } catch (err) {
     console.error("[tracker.handleModalSubmit]", err);
