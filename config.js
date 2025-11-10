@@ -1,14 +1,11 @@
 // config.js — HL Book Club Configuration (Final Stable Build)
 // ✅ Compatible with both named and default imports
 // ✅ Fixes getConfig() undefined crash
-// ✅ Keeps environment validation and sane defaults
+// ✅ Adds both autoBackupHours + autoBackupInterval for backward compatibility
 
 import dotenv from "dotenv";
 dotenv.config();
 
-// ─────────────────────────────────────────────────────────────
-//  BASE CONFIG OBJECT
-// ─────────────────────────────────────────────────────────────
 const config = {
   discord: {
     token: process.env.DISCORD_TOKEN || process.env.TOKEN || "",
@@ -24,12 +21,17 @@ const config = {
   storage: {
     dataDir: process.env.DATA_DIR || "./data",
     backupDir: process.env.BACKUP_DIR || "./backups",
-    backupRetentionDays: parseInt(process.env.BACKUP_RETENTION_DAYS || "7", 10),
+    backupRetention: parseInt(process.env.BACKUP_RETENTION_DAYS || "7", 10),
+
+    // ✅ support both keys to avoid breaking old files
     autoBackupHours: parseInt(process.env.AUTO_BACKUP_HOURS || "24", 10),
+    get autoBackupInterval() {
+      return this.autoBackupHours;
+    },
   },
 
   colors: {
-    primary: 0x9b59b6, // purple
+    primary: 0x9b59b6,
     gold: 0xf1c40f,
     success: 0x2ecc71,
     error: 0xe74c3c,
@@ -72,12 +74,6 @@ const config = {
       "admin",
     ],
   },
-
-  health: {
-    port: process.env.HEALTH_CHECK_PORT
-      ? parseInt(process.env.HEALTH_CHECK_PORT, 10)
-      : null,
-  },
 };
 
 // ─────────────────────────────────────────────────────────────
@@ -93,9 +89,7 @@ function validateConfig() {
   const missing = required.filter((r) => !r.val);
   if (missing.length) {
     console.error(
-      `❌ Missing environment variables: ${missing
-        .map((r) => r.key)
-        .join(", ")}`
+      `❌ Missing environment variables: ${missing.map((r) => r.key).join(", ")}`
     );
     process.exit(1);
   }
@@ -107,13 +101,10 @@ validateConfig();
 //  ACCESSOR FUNCTION (SAFE)
 // ─────────────────────────────────────────────────────────────
 export function getConfig(path) {
-  if (!path) return config; // ✅ safe default
+  if (!path) return config;
   const keys = path.split(".");
   return keys.reduce((obj, key) => (obj ? obj[key] : undefined), config);
 }
 
-// ✅ Restore named export for legacy imports
 export { config };
-
-// ✅ Default export for modern imports
 export default config;
