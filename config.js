@@ -1,141 +1,119 @@
-// config.js — Centralized Configuration
-// 🎯 Single source of truth for all bot settings
-// ✅ Environment variable management
-// ✅ Type validation and defaults
+// config.js — HL Book Club Configuration
+// ✅ Compatible with new index.js loader
+// ✅ Fixes crash when getConfig() called without arguments
+// ✅ Adds environment fallbacks + validation
 
 import dotenv from "dotenv";
 dotenv.config();
 
-// Validate required environment variables
-const required = ["DISCORD_TOKEN", "CLIENT_ID", "GUILD_ID"];
-const missing = required.filter((key) => !process.env[key]);
-
-if (missing.length > 0) {
-  console.error(`❌ Missing required environment variables: ${missing.join(", ")}`);
-  process.exit(1);
-}
-
-export const config = {
-  // ===== Discord Configuration =====
+// ─────────────────────────────────────────────────────────────
+//  BASE CONFIG OBJECT
+// ─────────────────────────────────────────────────────────────
+const config = {
   discord: {
-    token: process.env.DISCORD_TOKEN || process.env.TOKEN,
-    clientId: process.env.CLIENT_ID,
-    guildId: process.env.GUILD_ID,
-    activity: process.env.BOT_ACTIVITY || "Reading: Separation of Church and Hate",
+    token: process.env.DISCORD_TOKEN || process.env.TOKEN || "",
+    clientId: process.env.CLIENT_ID || "",
+    guildId: process.env.GUILD_ID || "",
+    activity: process.env.BOT_ACTIVITY || "📚 Reading with HL Book Club",
   },
 
-  // ===== API Keys =====
   apis: {
-    googleBooks: process.env.GOOGLE_BOOKS_KEY || null,
+    googleBooks: process.env.GOOGLE_BOOKS_KEY || "",
   },
 
-  // ===== Storage Configuration =====
   storage: {
     dataDir: process.env.DATA_DIR || "./data",
     backupDir: process.env.BACKUP_DIR || "./backups",
-    backupRetention: parseInt(process.env.BACKUP_RETENTION_DAYS) || 7,
-    autoBackupInterval: parseInt(process.env.AUTO_BACKUP_HOURS) || 24,
+    backupRetentionDays: parseInt(process.env.BACKUP_RETENTION_DAYS || "7", 10),
+    autoBackupHours: parseInt(process.env.AUTO_BACKUP_HOURS || "24", 10),
   },
 
-  // ===== Feature Settings =====
+  colors: {
+    primary: 0x9b59b6, // purple
+    gold: 0xf1c40f,
+    success: 0x2ecc71,
+    error: 0xe74c3c,
+    info: 0x3498db,
+    warning: 0xf39c12,
+  },
+
+  validation: {
+    maxTitleLength: 150,
+    maxAuthorLength: 80,
+    maxQuoteLength: 800,
+    minPage: 1,
+    maxPage: 20000,
+  },
+
   features: {
-    // Pagination
     shelfPageSize: 10,
     leaderboardLimit: 10,
-    quotesDisplayLimit: 10,
-    searchResultsLimit: 10,
-
-    // Progress bars
-    progressBarWidth: 18,
-
-    // Analytics
-    maxReadingLogsPerUser: 2000,
-    streakDayThreshold: 1.5, // days
-
-    // Rate limiting
-    searchCacheTimeout: 300000, // 5 minutes
-    maxCachedSearches: 100,
+    quoteLimit: 10,
+    searchCacheLimit: 20,
+    progressBarWidth: 20,
   },
 
-  // ===== Theme Colors =====
-  colors: {
-    primary: 0x8b5cf6,    // Purple
-    gold: 0xfbbf24,       // Gold
-    success: 0x22c55e,    // Green
-    error: 0xef4444,      // Red
-    info: 0x0ea5e9,       // Blue
-    warning: 0xfacc15,    // Yellow
-  },
-
-  // ===== Validation Rules =====
-  validation: {
-    maxTitleLength: 200,
-    maxAuthorLength: 100,
-    maxQuoteLength: 1000,
-    maxNotesLength: 500,
-    maxPageNumber: 99999,
-    minPageNumber: 0,
-    maxSearchQueryLength: 100,
-  },
-
-  // ===== Debug & Logging =====
   debug: {
     enabled: process.env.DEBUG === "true",
-    logLevel: process.env.LOG_LEVEL || "info", // error, warn, info, debug
+    logLevel: process.env.LOG_LEVEL || "info",
     logToFile: process.env.LOG_TO_FILE === "true",
-    logFilePath: process.env.LOG_FILE_PATH || "./logs/bot.log",
+    logFilePath: process.env.LOG_FILE_PATH || "./bot.log",
   },
 
-  // ===== Command Visibility =====
   commands: {
-    private: ["tracker", "my-stats", "quote", "my-quotes"],
-    public: ["search", "leaderboard", "show-quotes", "profile", "shelf", "book"],
+    public: ["shelf", "leaderboard", "profile"],
+    private: [
+      "tracker",
+      "search",
+      "book",
+      "quote",
+      "my-quotes",
+      "my-stats",
+      "admin",
+    ],
+  },
+
+  health: {
+    port: process.env.HEALTH_CHECK_PORT
+      ? parseInt(process.env.HEALTH_CHECK_PORT, 10)
+      : null,
   },
 };
 
-// Helper to get nested config values safely
-export function getConfig(path, defaultValue = null) {
-  const keys = path.split(".");
-  let value = config;
-  
-  for (const key of keys) {
-    if (value && typeof value === "object" && key in value) {
-      value = value[key];
-    } else {
-      return defaultValue;
-    }
-  }
-  
-  return value;
-}
-
-// Validate configuration on load
+// ─────────────────────────────────────────────────────────────
+//  VALIDATION
+// ─────────────────────────────────────────────────────────────
 function validateConfig() {
-  const errors = [];
+  const required = [
+    { key: "DISCORD_TOKEN", val: config.discord.token },
+    { key: "CLIENT_ID", val: config.discord.clientId },
+    { key: "GUILD_ID", val: config.discord.guildId },
+  ];
 
-  // Check numeric values
-  if (config.storage.backupRetention < 1) {
-    errors.push("backupRetention must be >= 1");
-  }
-
-  if (config.features.shelfPageSize < 1 || config.features.shelfPageSize > 25) {
-    errors.push("shelfPageSize must be between 1 and 25");
-  }
-
-  // Check color values
-  for (const [key, value] of Object.entries(config.colors)) {
-    if (typeof value !== "number" || value < 0 || value > 0xffffff) {
-      errors.push(`Invalid color value for ${key}: ${value}`);
-    }
-  }
-
-  if (errors.length > 0) {
-    console.error("❌ Configuration validation failed:");
-    errors.forEach((err) => console.error(`   - ${err}`));
+  const missing = required.filter((r) => !r.val);
+  if (missing.length) {
+    console.error(
+      `❌ Missing environment variables: ${missing
+        .map((r) => r.key)
+        .join(", ")}`
+    );
     process.exit(1);
   }
 }
 
 validateConfig();
 
+// ─────────────────────────────────────────────────────────────
+//  ACCESSOR FUNCTION (SAFE)
+// ─────────────────────────────────────────────────────────────
+export function getConfig(path) {
+  // ✅ Return full config when no path provided
+  if (!path) return config;
+
+  // Support nested keys like "discord.token"
+  const keys = path.split(".");
+  return keys.reduce((obj, key) => (obj ? obj[key] : undefined), config);
+}
+
+// For convenience (commonjs interop / legacy imports)
 export default config;
