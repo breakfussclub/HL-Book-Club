@@ -1,8 +1,7 @@
-// commands/tracker.js — Phase 11: Google Books Search Flow (Safe + Cached)
-// ✅ Fixes InteractionAlreadyReplied
-// ✅ Restores 2-step Google Books modal flow with confirmation
-// ✅ Adds memory cache to keep dropdown values < 100 chars
-// ✅ Keeps all tracker management logic
+// commands/tracker.js — Phase 11: Google Books Search Flow (Final Stable Build)
+// ✅ Fixes "Interaction failed" (moves dropdown handler to handleComponent)
+// ✅ Replaces deprecated ephemeral:true with flags: 1 << 6
+// ✅ Retains all safe interaction handling and caching logic
 
 import {
   SlashCommandBuilder,
@@ -29,7 +28,7 @@ const PURPLE = 0x8b5cf6;
 const GOLD = 0xf59e0b;
 const DEBUG = process.env.DEBUG === "true";
 
-// ===== Simple in-memory search cache =====
+// ===== In-memory cache for search results =====
 const searchCache = new Map(); // userId -> [books]
 
 // ===== Helpers =====
@@ -213,27 +212,41 @@ export async function handleComponent(interaction) {
     const userId = interaction.user.id;
     const trackers = await getUserTrackers(userId);
 
-    // Select tracker
+    // Selecting existing tracker
     if (interaction.customId === "trk_select_view") {
       const bookId = interaction.values[0];
       return renderDetail(interaction, interaction.user, bookId);
     }
 
-    // Open Search Modal
-    if (interaction.customId === "trk_search_modal_open") {
-      const modal = new ModalBuilder()
-        .setCustomId("trk_search_modal_submit")
-        .setTitle("Search for a Book")
-        .addComponents(
-          new ActionRowBuilder().addComponents(
-            new TextInputBuilder()
-              .setCustomId("query")
-              .setLabel("Enter a book title or author")
-              .setStyle(TextInputStyle.Short)
-              .setRequired(true)
-          )
-        );
-      return interaction.showModal(modal);
+    // Selecting search result (moved from modalSubmit)
+    if (interaction.customId === "trk_select_add_result") {
+      const cache = searchCache.get(userId) || [];
+      const selectedId = interaction.values[0];
+      const book = cache.find((b) => b.id === selectedId);
+      if (!book) {
+        return interaction.reply({
+          content: "❌ Could not find that book in cache.",
+          flags: 1 << 6,
+        });
+      }
+
+      const confirm = new EmbedBuilder()
+        .setTitle(`📘 Add "${book.title}"?`)
+        .setDescription(book.author ? `by *${book.author}*` : "")
+        .setColor(PURPLE);
+
+      const row = new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+          .setCustomId(`trk_confirm_add_${book.id}`)
+          .setLabel("✅ Add")
+          .setStyle(ButtonStyle.Success),
+        new ButtonBuilder()
+          .setCustomId("trk_cancel_add")
+          .setLabel("❌ Cancel")
+          .setStyle(ButtonStyle.Danger)
+      );
+
+      return interaction.reply({ embeds: [confirm], components: [row], flags: 1 << 6 });
     }
 
     // Confirm Add Book
@@ -242,7 +255,10 @@ export async function handleComponent(interaction) {
       const cache = searchCache.get(userId) || [];
       const book = cache.find((b) => b.id === bookId);
       if (!book) {
-        return interaction.reply({ content: "❌ Book data not found in cache.", ephemeral: true });
+        return interaction.reply({
+          content: "❌ Book data not found in cache.",
+          flags: 1 << 6,
+        });
       }
 
       const userTrackers = await getUserTrackers(userId);
@@ -266,6 +282,23 @@ export async function handleComponent(interaction) {
       return renderList(interaction, interaction.user);
     }
 
+    // Open search modal
+    if (interaction.customId === "trk_search_modal_open") {
+      const modal = new ModalBuilder()
+        .setCustomId("trk_search_modal_submit")
+        .setTitle("Search for a Book")
+        .addComponents(
+          new ActionRowBuilder().addComponents(
+            new TextInputBuilder()
+              .setCustomId("query")
+              .setLabel("Enter a book title or author")
+              .setStyle(TextInputStyle.Short)
+              .setRequired(true)
+          )
+        );
+      return interaction.showModal(modal);
+    }
+
     // Back button
     if (interaction.customId === "trk_back") {
       return renderList(interaction, interaction.user);
@@ -278,11 +311,9 @@ export async function handleComponent(interaction) {
 // ===== Modal Submit Handler =====
 export async function handleModalSubmit(interaction) {
   try {
-    const user = interaction.user;
-
     if (interaction.customId === "trk_search_modal_submit") {
       const query = interaction.fields.getTextInputValue("query").trim();
-      await interaction.deferReply({ ephemeral: true });
+      await interaction.deferReply({ flags: 1 << 6 });
 
       const results = await hybridSearchMany(query);
       if (!results?.length) {
@@ -290,7 +321,7 @@ export async function handleModalSubmit(interaction) {
       }
 
       const top = results.slice(0, 5);
-      searchCache.set(user.id, top);
+      searchCache.set(interaction.user.id, top);
 
       const embed = new EmbedBuilder()
         .setTitle(`🔍 Results for "${query}"`)
@@ -305,41 +336,12 @@ export async function handleModalSubmit(interaction) {
             top.map((b) => ({
               label: b.title.slice(0, 100),
               description: b.authors?.[0] ? b.authors[0].slice(0, 100) : "Unknown author",
-              value: b.id, // ✅ safe under 100 chars
+              value: b.id,
             }))
           )
       );
 
       return interaction.editReply({ embeds: [embed], components: [row] });
-    }
-
-    // Selecting a search result from dropdown
-    if (interaction.customId === "trk_select_add_result") {
-      const userId = interaction.user.id;
-      const cache = searchCache.get(userId) || [];
-      const selectedId = interaction.values[0];
-      const book = cache.find((b) => b.id === selectedId);
-      if (!book) {
-        return interaction.reply({ content: "❌ Could not find that book in cache.", ephemeral: true });
-      }
-
-      const confirm = new EmbedBuilder()
-        .setTitle(`📘 Add "${book.title}"?`)
-        .setDescription(book.author ? `by *${book.author}*` : "")
-        .setColor(PURPLE);
-
-      const row = new ActionRowBuilder().addComponents(
-        new ButtonBuilder()
-          .setCustomId(`trk_confirm_add_${book.id}`)
-          .setLabel("✅ Add")
-          .setStyle(ButtonStyle.Success),
-        new ButtonBuilder()
-          .setCustomId("trk_cancel_add")
-          .setLabel("❌ Cancel")
-          .setStyle(ButtonStyle.Danger)
-      );
-
-      return interaction.reply({ embeds: [confirm], components: [row], ephemeral: true });
     }
   } catch (err) {
     console.error("[tracker.handleModalSubmit]", err);
