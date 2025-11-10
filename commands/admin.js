@@ -13,7 +13,6 @@ import {
   listBackups,
   getBackupStatus,
   cleanupOldBackups,
-  verifyBackup,
 } from "../utils/backup.js";
 import {
   verifyDataIntegrity,
@@ -301,7 +300,7 @@ async function handleCleanup(interaction) {
 async function handleLogs(interaction) {
   if (!config.debug.logToFile) {
     return interaction.editReply({
-      content: "⚠️ File logging is not enabled. Set `LOG_TO_FILE=true` in .env",
+      content: "⚠️ File logging is not enabled. Set `LOG_TO_FILE=true` in Railway variables",
     });
   }
 
