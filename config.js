@@ -1,7 +1,7 @@
-// config.js — HL Book Club Configuration
-// ✅ Compatible with new index.js loader
-// ✅ Fixes crash when getConfig() called without arguments
-// ✅ Adds environment fallbacks + validation
+// config.js — HL Book Club Configuration (Final Stable Build)
+// ✅ Compatible with both named and default imports
+// ✅ Fixes getConfig() undefined crash
+// ✅ Keeps environment validation and sane defaults
 
 import dotenv from "dotenv";
 dotenv.config();
@@ -107,13 +107,13 @@ validateConfig();
 //  ACCESSOR FUNCTION (SAFE)
 // ─────────────────────────────────────────────────────────────
 export function getConfig(path) {
-  // ✅ Return full config when no path provided
-  if (!path) return config;
-
-  // Support nested keys like "discord.token"
+  if (!path) return config; // ✅ safe default
   const keys = path.split(".");
   return keys.reduce((obj, key) => (obj ? obj[key] : undefined), config);
 }
 
-// For convenience (commonjs interop / legacy imports)
+// ✅ Restore named export for legacy imports
+export { config };
+
+// ✅ Default export for modern imports
 export default config;
