@@ -1,8 +1,13 @@
-// index.js — HL Book Club Enhanced Bot
-// ✅ Integrated logging, error handling, and backup systems
-// ✅ Graceful shutdown and health monitoring
-// ✅ Production-ready with proper safety features
+// index.js — HL Book Club (Phase 11 Baseline + Loader Fix)
+// ✅ Fixes “Cannot assign to read only property 'execute'”
+// ✅ Safely wraps command handlers without mutating ESM imports
+// ✅ Auto-creates /data directory before initialization
+// ✅ Keeps unified modal + component routing and backup scheduler
 
+import "dotenv/config";
+import fs from "fs";
+import path from "path";
+import { fileURLToPath } from "url";
 import {
   Client,
   GatewayIntentBits,
@@ -11,89 +16,95 @@ import {
   REST,
   Routes,
 } from "discord.js";
-import fs from "fs";
-import path from "path";
-import { fileURLToPath } from "url";
 
-// ===== Import Enhanced Utilities =====
-import { config } from "./config.js";
-import { logger } from "./utils/logger.js";
-import {
-  setupGlobalErrorHandlers,
-  handleInteractionError,
-  safeExecute,
-  safeHandleComponent,
-} from "./utils/errorHandler.js";
+import { getConfig } from "./config.js";
 import { ensureAllFiles } from "./utils/storage.js";
-import { startBackupScheduler } from "./utils/backup.js";
+import { setupGlobalErrorHandlers, safeExecute, safeHandleComponent } from "./utils/errorHandler.js";
 import { isEphemeral } from "./utils/commandVisibility.js";
+import { logger } from "./utils/logger.js";
+import { startBackupScheduler } from "./utils/backup.js";
 
-// ===== Setup Global Error Handlers =====
-setupGlobalErrorHandlers();
-
-// ===== Constants =====
+const config = getConfig();
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// ===== Initialize Client =====
-const client = new Client({
-  intents: [
-    GatewayIntentBits.Guilds,
-    GatewayIntentBits.GuildMessages,
-    GatewayIntentBits.MessageContent,
-  ],
-});
+// ─────────────────────────────────────────────────────────────
+//   INITIAL SETUP
+// ─────────────────────────────────────────────────────────────
 
+// Ensure data dir exists before anything touches it
+try {
+  fs.mkdirSync(config.storage.dataDir, { recursive: true });
+} catch (err) {
+  logger.warn("Failed to ensure data directory", err);
+}
+
+// Discord client
+const client = new Client({
+  intents: [GatewayIntentBits.Guilds],
+});
 client.commands = new Collection();
 
-// ===== Load Commands =====
+// ─────────────────────────────────────────────────────────────
+//   COMMAND LOADER (ESM-SAFE)
+// ─────────────────────────────────────────────────────────────
+
 async function loadCommands() {
   const commandsPath = path.join(__dirname, "commands");
   const commandFiles = fs
     .readdirSync(commandsPath)
-    .filter((f) => f.endsWith(".js"));
-  const allDefinitions = [];
+    .filter((file) => file.endsWith(".js"));
 
-  logger.info(`Loading ${commandFiles.length} command modules`);
+  const definitions = [];
 
   for (const file of commandFiles) {
+    const filePath = path.join(commandsPath, file);
     try {
-      const filePath = path.join(commandsPath, file);
       const mod = await import(`file://${filePath}`);
 
-      if (mod.definitions && mod.execute) {
-        for (const def of mod.definitions) {
-          // Wrap execute in safe handler
-          const originalExecute = mod.execute;
-          mod.execute = safeExecute(originalExecute);
+      // Create a shallow clone so we don't mutate ESM import
+      const wrapped = { ...mod };
 
-          // Wrap component handler if exists
-          if (mod.handleComponent) {
-            const originalHandler = mod.handleComponent;
-            mod.handleComponent = safeHandleComponent(originalHandler);
-          }
-
-          client.commands.set(def.name, mod);
-          allDefinitions.push(def);
-        }
-        logger.debug(`Loaded command: ${file}`);
-      } else {
-        logger.warn(`Skipped ${file} - missing definitions or execute`);
+      if (typeof mod.execute === "function") {
+        wrapped.execute = safeExecute(mod.execute);
       }
-    } catch (error) {
-      logger.error(`Failed to load command ${file}`, { error: error.message });
+      if (typeof mod.handleComponent === "function") {
+        wrapped.handleComponent = safeHandleComponent(mod.handleComponent);
+      }
+      if (typeof mod.handleModalSubmit === "function") {
+        wrapped.handleModalSubmit = safeHandleComponent(mod.handleModalSubmit);
+      }
+
+      // Register command definitions
+      if (Array.isArray(mod.definitions)) {
+        definitions.push(...mod.definitions);
+      }
+
+      // Store on client
+      const name =
+        wrapped.commandName ||
+        (mod.definitions?.[0]?.name ?? file.replace(".js", ""));
+      client.commands.set(name, wrapped);
+
+      logger.info(`Loaded command module: ${file}`);
+    } catch (err) {
+      logger.error(`Failed to load command ${file}`, { error: err.message });
     }
   }
 
-  return allDefinitions;
+  return definitions;
 }
 
-// ===== Register Commands =====
+// ─────────────────────────────────────────────────────────────
+//   COMMAND REGISTRATION
+// ─────────────────────────────────────────────────────────────
+
 async function registerCommands(definitions) {
   try {
     const rest = new REST({ version: "10" }).setToken(config.discord.token);
-
-    logger.info(`Registering ${definitions.length} slash commands`);
+    logger.info(
+      `Registering ${definitions.length} slash command${definitions.length === 1 ? "" : "s"}`
+    );
 
     await rest.put(
       Routes.applicationGuildCommands(
@@ -105,191 +116,74 @@ async function registerCommands(definitions) {
 
     logger.info("✅ Commands registered successfully");
   } catch (error) {
-    logger.error("❌ Command registration failed", { error: error.message });
-    throw error;
+    logger.error("Failed to register commands", { error: error.message });
   }
 }
 
-// ===== Bot Ready Event =====
-client.once(Events.ClientReady, async (c) => {
-  logger.info(`✅ Logged in as ${c.user.tag}`);
+// ─────────────────────────────────────────────────────────────
+//   INTERACTION HANDLING
+// ─────────────────────────────────────────────────────────────
 
-  // Set presence
-  client.user.setPresence({
-    activities: [{ name: config.discord.activity, type: 0 }],
-    status: "online",
-  });
-
-  try {
-    // Initialize data files
-    await ensureAllFiles();
-
-    // Load and register commands
-    const definitions = await loadCommands();
-    await registerCommands(definitions);
-
-    // Start backup scheduler
-    startBackupScheduler();
-
-    logger.info("🚀 Bot fully initialized and ready");
-  } catch (error) {
-    logger.error("❌ Initialization failed", { error: error.message });
-    process.exit(1);
-  }
-});
-
-// ===== Interaction Handler =====
 client.on(Events.InteractionCreate, async (interaction) => {
   try {
-    // ===== Slash Commands =====
+    // Slash command
     if (interaction.isChatInputCommand()) {
       const command = client.commands.get(interaction.commandName);
+      if (!command) return;
 
-      if (!command) {
-        logger.warn("Unknown command", { command: interaction.commandName });
-        return await interaction.reply({
-          content: "⚠️ Unknown command.",
-          flags: 1 << 6,
-        });
-      }
+      const ephemeral = isEphemeral(interaction.commandName);
+      await interaction.deferReply({ ephemeral });
 
-      // Log command execution
-      logger.logCommand(interaction);
-
-      // Determine visibility
-      const flags = isEphemeral(interaction.commandName) ? 1 << 6 : undefined;
-
-      // Commands that open modals should NOT be deferred
-      const noDefer = ["tracker", "quote"];
-      if (!noDefer.includes(interaction.commandName)) {
-        await interaction.deferReply({ flags });
-      }
-
-      // Execute command (already wrapped in safeExecute)
-      await command.execute(interaction);
-      return;
+      return await command.execute(interaction);
     }
 
-    // ===== Buttons & Select Menus =====
+    // Buttons / selects
     if (interaction.isButton() || interaction.isStringSelectMenu()) {
-      logger.logComponent(interaction);
-
-      // Special handling for "Add to Tracker" button
-      if (interaction.isButton() && interaction.customId === "trk_add_open") {
-        const trackerModule = client.commands.get("tracker");
-        if (trackerModule?.handleComponent) {
-          await trackerModule.handleComponent(interaction);
-        }
-        return;
-      }
-
-      // Route to appropriate command handler
-      for (const mod of client.commands.values()) {
-        if (mod.handleComponent) {
-          await mod.handleComponent(interaction);
+      for (const [, mod] of client.commands) {
+        if (typeof mod.handleComponent === "function") {
+          const handled = await mod.handleComponent(interaction);
+          if (handled) return;
         }
       }
-      return;
     }
 
-    // ===== Modal Submissions =====
+    // Modals
     if (interaction.isModalSubmit()) {
-      logger.logComponent(interaction, { type: "modal" });
-
-      for (const mod of client.commands.values()) {
-        if (mod.handleModalSubmit) {
-          await mod.handleModalSubmit(interaction);
-        } else if (mod.handleComponent) {
-          await mod.handleComponent(interaction);
+      for (const [, mod] of client.commands) {
+        if (typeof mod.handleModalSubmit === "function") {
+          const handled = await mod.handleModalSubmit(interaction);
+          if (handled) return;
+        }
+        // Fallback: reuse component handler for modals
+        if (typeof mod.handleComponent === "function") {
+          const handled = await mod.handleComponent(interaction);
+          if (handled) return;
         }
       }
-      return;
     }
-  } catch (error) {
-    await handleInteractionError(interaction, error);
+  } catch (err) {
+    logger.error("Interaction handler failed", { error: err.message });
   }
 });
 
-// ===== Discord Client Error Handling =====
-client.on(Events.Error, (error) => {
-  logger.error("Discord client error", { error: error.message });
+// ─────────────────────────────────────────────────────────────
+//   BOOTSTRAP
+// ─────────────────────────────────────────────────────────────
+
+client.once(Events.ClientReady, async () => {
+  logger.info(`✅ Logged in as ${client.user.tag}`);
+  client.user.setActivity(config.discord.activity || "HL Book Club 📚");
+
+  await ensureAllFiles();
+  startBackupScheduler();
+
+  logger.info("🚀 Bot fully initialized and ready");
 });
 
-client.on(Events.Warn, (warning) => {
-  logger.warn("Discord client warning", { warning });
-});
+setupGlobalErrorHandlers();
 
-// ===== Graceful Shutdown =====
-async function gracefulShutdown(signal) {
-  logger.info(`${signal} received, shutting down gracefully`);
-
-  try {
-    // Stop accepting new interactions
-    client.removeAllListeners(Events.InteractionCreate);
-
-    // Destroy Discord client
-    client.destroy();
-
-    // Close logger
-    await logger.close();
-
-    logger.info("Shutdown complete");
-    process.exit(0);
-  } catch (error) {
-    logger.error("Error during shutdown", { error: error.message });
-    process.exit(1);
-  }
-}
-
-process.on("SIGTERM", () => gracefulShutdown("SIGTERM"));
-process.on("SIGINT", () => gracefulShutdown("SIGINT"));
-
-// ===== Health Check Endpoint (Optional) =====
-// Useful for container orchestration platforms
-if (process.env.HEALTH_CHECK_PORT) {
-  import("http").then(({ createServer }) => {
-    const port = parseInt(process.env.HEALTH_CHECK_PORT);
-
-    createServer((req, res) => {
-      if (req.url === "/health") {
-        const healthy = client.isReady();
-        res.writeHead(healthy ? 200 : 503, { "Content-Type": "application/json" });
-        res.end(
-          JSON.stringify({
-            status: healthy ? "healthy" : "unhealthy",
-            uptime: process.uptime(),
-            timestamp: new Date().toISOString(),
-          })
-        );
-      } else {
-        res.writeHead(404);
-        res.end();
-      }
-    }).listen(port, () => {
-      logger.info(`Health check endpoint listening on port ${port}`);
-    });
-  });
-}
-
-// ===== Login =====
-client
-  .login(config.discord.token)
-  .then(() => {
-    logger.info("Discord login successful");
-  })
-  .catch((error) => {
-    logger.error("❌ Discord login failed", { error: error.message });
-    process.exit(1);
-  });
-
-// ===== Metrics Tracking (Optional) =====
-setInterval(() => {
-  if (client.isReady()) {
-    logger.debug("Bot metrics", {
-      guilds: client.guilds.cache.size,
-      users: client.users.cache.size,
-      uptime: Math.floor(process.uptime()),
-      memoryMB: Math.round(process.memoryUsage().heapUsed / 1024 / 1024),
-    });
-  }
-}, 300000); // Every 5 minutes
+(async () => {
+  const definitions = await loadCommands();
+  await registerCommands(definitions);
+  await client.login(config.discord.token);
+})();
