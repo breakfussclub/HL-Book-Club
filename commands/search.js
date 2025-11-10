@@ -1,7 +1,8 @@
-// commands/search.js — Phase 10 HL Book Club Edition
+// commands/search.js — Phase 10 HL Book Club Edition (Public Output)
 // ✅ Works with HL Book Club theme + safe color fallback
 // ✅ Retains ❤️ Favorite logic and Google Books integration
 // ✅ Adds userId field to favorites
+// ✅ Makes /search output PUBLIC (no ephemeral flag)
 
 import {
   SlashCommandBuilder,
@@ -32,7 +33,7 @@ export async function execute(interaction) {
   try {
     const query = interaction.options.getString("query", true);
 
-    // ✅ Guarded defer
+    // ✅ Guarded defer — now ensures public response
     if (!interaction.deferred && !interaction.replied) {
       await interaction.deferReply({ ephemeral: false });
     }
@@ -116,19 +117,20 @@ export async function execute(interaction) {
     interaction.client.latestSearch = interaction.client.latestSearch || new Map();
     interaction.client.latestSearch.set(interaction.user.id, book);
 
+    // ✅ Public reply (no flags)
     await interaction.editReply({ embeds: [embed], components: [row] });
 
     if (DEBUG)
       console.log(`[search] "${book.title}" shown to ${interaction.user.username}`);
   } catch (err) {
     console.error("[search.execute]", err);
-    const msg = { content: "⚠️ Something went wrong.", flags: 1 << 6 };
+    const msg = { content: "⚠️ Something went wrong." };
     if (interaction.deferred || interaction.replied) await interaction.editReply(msg);
     else await interaction.reply(msg);
   }
 }
 
-// ❤️ Favorite button handler — now includes userId for shelf
+// ❤️ Favorite button handler — still ephemeral feedback (intentional)
 export async function handleComponent(i) {
   try {
     if (i.isButton() && i.customId === "fav_add") {
@@ -150,7 +152,7 @@ export async function handleComponent(i) {
         });
       }
 
-      // ✅ Now includes userId for consistent shelf display
+      // ✅ Includes userId for consistent shelf display
       list.push({
         id: book.id,
         userId: i.user.id,
@@ -165,7 +167,7 @@ export async function handleComponent(i) {
 
       await i.reply({
         content: `✅ Added **${book.title || "Untitled"}** to your favorites!`,
-        flags: 1 << 6,
+        flags: 1 << 6, // keep ephemeral for personal confirmation
       });
 
       if (DEBUG)
