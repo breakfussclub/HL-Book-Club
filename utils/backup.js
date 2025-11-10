@@ -1,4 +1,4 @@
-// utils/backup.js — Automated Backup System
+// utils/backup.js — Automated Backup System (Stable)
 // 💾 Regular backups of JSON data files
 // ✅ Automatic retention policy
 // ✅ Manual backup trigger
@@ -32,7 +32,6 @@ export async function createBackup() {
         backedUp.push(name);
       } catch (error) {
         if (error.code !== "ENOENT") {
-          // Only log if it's not a "file doesn't exist" error
           failed.push({ name, error: error.message });
         }
       }
@@ -53,10 +52,7 @@ export async function createBackup() {
     };
   } catch (error) {
     logger.error("Backup creation failed", { error: error.message });
-    return {
-      success: false,
-      error: error.message,
-    };
+    return { success: false, error: error.message };
   }
 }
 
@@ -101,14 +97,12 @@ export async function restoreBackup(timestamp) {
   try {
     const backupDir = path.join(config.storage.backupDir, timestamp);
 
-    // Verify backup exists
     try {
       await fs.access(backupDir);
     } catch {
       throw new Error(`Backup ${timestamp} not found`);
     }
 
-    // Create a pre-restore backup
     const preRestoreBackup = await createBackup();
     logger.info("Pre-restore backup created", {
       backup: preRestoreBackup.timestamp,
@@ -117,7 +111,6 @@ export async function restoreBackup(timestamp) {
     const restored = [];
     const failed = [];
 
-    // Restore each file
     for (const [name, filePath] of Object.entries(FILES)) {
       try {
         const backupPath = path.join(backupDir, path.basename(filePath));
@@ -183,13 +176,13 @@ export async function cleanupOldBackups() {
  * Start automatic backup scheduler
  */
 export function startBackupScheduler() {
-  const intervalMs = config.storage.autoBackupInterval * 60 * 60 * 1000;
+  // ✅ fixed to use autoBackupHours key
+  const hours = config.storage.autoBackupHours || 24;
+  const intervalMs = hours * 60 * 60 * 1000;
 
-  logger.info("Backup scheduler started", {
-    intervalHours: config.storage.autoBackupInterval,
-  });
+  logger.info("Backup scheduler started", { intervalHours: hours });
 
-  // Run initial backup
+  // Run initial backup safely
   createBackup().then(() => cleanupOldBackups());
 
   // Schedule recurring backups
@@ -243,7 +236,7 @@ export async function verifyBackup(timestamp) {
       const filePath = path.join(backupDir, file);
       try {
         const content = await fs.readFile(filePath, "utf-8");
-        JSON.parse(content); // Verify it's valid JSON
+        JSON.parse(content);
         checks.push({ file, valid: true });
       } catch (error) {
         checks.push({ file, valid: false, error: error.message });
@@ -252,17 +245,12 @@ export async function verifyBackup(timestamp) {
 
     const allValid = checks.every((c) => c.valid);
 
-    return {
-      valid: allValid,
-      checks,
-    };
+    return { valid: allValid, checks };
   } catch (error) {
     logger.error("Backup verification failed", { error: error.message });
     return { valid: false, error: error.message };
   }
 }
-
-// ===== Command Integration Helpers =====
 
 /**
  * Get backup status for display in commands
@@ -281,6 +269,6 @@ export async function getBackupStatus() {
         }
       : null,
     retentionDays: config.storage.backupRetention,
-    autoBackupInterval: config.storage.autoBackupInterval,
+    autoBackupInterval: config.storage.autoBackupHours,
   };
 }
