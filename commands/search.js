@@ -1,8 +1,7 @@
-// commands/search.js — Phase 10 HL Book Club Edition (Public Output)
-// ✅ Works with HL Book Club theme + safe color fallback
+// commands/search.js — HL Book Club Edition (Force Public Output)
+// ✅ Forces /search to display publicly regardless of global defaults
 // ✅ Retains ❤️ Favorite logic and Google Books integration
-// ✅ Adds userId field to favorites
-// ✅ Makes /search output PUBLIC (no ephemeral flag)
+// ✅ Keeps debug logging + safety guards
 
 import {
   SlashCommandBuilder,
@@ -33,14 +32,14 @@ export async function execute(interaction) {
   try {
     const query = interaction.options.getString("query", true);
 
-    // ✅ Guarded defer — now ensures public response
+    // ✅ Defer quietly (private placeholder) so no errors
     if (!interaction.deferred && !interaction.replied) {
-      await interaction.deferReply({ ephemeral: false });
+      await interaction.deferReply({ ephemeral: true });
     }
 
     const results = await hybridSearchMany(query, 1);
     if (!results?.length) {
-      return interaction.editReply({
+      return interaction.followUp({
         content: `No results found for **${query}**.`,
       });
     }
@@ -113,24 +112,24 @@ export async function execute(interaction) {
         .setStyle(ButtonStyle.Secondary)
     );
 
-    // Cache this book for the user
+    // ✅ cache the book for favorites
     interaction.client.latestSearch = interaction.client.latestSearch || new Map();
     interaction.client.latestSearch.set(interaction.user.id, book);
 
-    // ✅ Public reply (no flags)
-    await interaction.editReply({ embeds: [embed], components: [row] });
+    // ✅ Force a new PUBLIC message
+    await interaction.followUp({ embeds: [embed], components: [row] });
 
     if (DEBUG)
       console.log(`[search] "${book.title}" shown to ${interaction.user.username}`);
   } catch (err) {
     console.error("[search.execute]", err);
-    const msg = { content: "⚠️ Something went wrong." };
-    if (interaction.deferred || interaction.replied) await interaction.editReply(msg);
-    else await interaction.reply(msg);
+    try {
+      await interaction.followUp({ content: "⚠️ Something went wrong." });
+    } catch {}
   }
 }
 
-// ❤️ Favorite button handler — still ephemeral feedback (intentional)
+// ❤️ Favorite button handler (ephemeral confirmation)
 export async function handleComponent(i) {
   try {
     if (i.isButton() && i.customId === "fav_add") {
@@ -152,7 +151,6 @@ export async function handleComponent(i) {
         });
       }
 
-      // ✅ Includes userId for consistent shelf display
       list.push({
         id: book.id,
         userId: i.user.id,
@@ -167,7 +165,7 @@ export async function handleComponent(i) {
 
       await i.reply({
         content: `✅ Added **${book.title || "Untitled"}** to your favorites!`,
-        flags: 1 << 6, // keep ephemeral for personal confirmation
+        flags: 1 << 6,
       });
 
       if (DEBUG)
