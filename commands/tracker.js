@@ -1,8 +1,8 @@
-// commands/tracker.js — Phase 11: Restored Google Books Search Flow (Safe Interaction Handling)
-// ✅ Fixes InteractionAlreadyReplied error
-// ✅ Restores 2-step Google Books search modal flow
-// ✅ Adds confirmation before adding book
-// ✅ Keeps all update/archive/delete logic intact
+// commands/tracker.js — Phase 11: Google Books Search Flow (Safe + Cached)
+// ✅ Fixes InteractionAlreadyReplied
+// ✅ Restores 2-step Google Books modal flow with confirmation
+// ✅ Adds memory cache to keep dropdown values < 100 chars
+// ✅ Keeps all tracker management logic
 
 import {
   SlashCommandBuilder,
@@ -28,6 +28,9 @@ import { hybridSearchMany } from "../utils/search.js";
 const PURPLE = 0x8b5cf6;
 const GOLD = 0xf59e0b;
 const DEBUG = process.env.DEBUG === "true";
+
+// ===== Simple in-memory search cache =====
+const searchCache = new Map(); // userId -> [books]
 
 // ===== Helpers =====
 const clamp = (n, min, max) => Math.max(min, Math.min(max, n));
@@ -235,9 +238,14 @@ export async function handleComponent(interaction) {
 
     // Confirm Add Book
     if (interaction.customId.startsWith("trk_confirm_add_")) {
-      const book = JSON.parse(interaction.customId.replace("trk_confirm_add_", ""));
-      const userTrackers = await getUserTrackers(userId);
+      const bookId = interaction.customId.replace("trk_confirm_add_", "");
+      const cache = searchCache.get(userId) || [];
+      const book = cache.find((b) => b.id === bookId);
+      if (!book) {
+        return interaction.reply({ content: "❌ Book data not found in cache.", ephemeral: true });
+      }
 
+      const userTrackers = await getUserTrackers(userId);
       userTrackers.push({
         id: book.id,
         title: book.title,
@@ -262,7 +270,6 @@ export async function handleComponent(interaction) {
     if (interaction.customId === "trk_back") {
       return renderList(interaction, interaction.user);
     }
-
   } catch (err) {
     console.error("[tracker.handleComponent]", err);
   }
@@ -283,6 +290,8 @@ export async function handleModalSubmit(interaction) {
       }
 
       const top = results.slice(0, 5);
+      searchCache.set(user.id, top);
+
       const embed = new EmbedBuilder()
         .setTitle(`🔍 Results for "${query}"`)
         .setDescription("Select a book below to add it to your tracker.")
@@ -296,13 +305,7 @@ export async function handleModalSubmit(interaction) {
             top.map((b) => ({
               label: b.title.slice(0, 100),
               description: b.authors?.[0] ? b.authors[0].slice(0, 100) : "Unknown author",
-              value: JSON.stringify({
-                id: b.id,
-                title: b.title,
-                author: b.authors?.[0] || "",
-                pageCount: b.pageCount,
-                thumbnail: b.thumbnail || null,
-              }),
+              value: b.id, // ✅ safe under 100 chars
             }))
           )
       );
@@ -312,7 +315,14 @@ export async function handleModalSubmit(interaction) {
 
     // Selecting a search result from dropdown
     if (interaction.customId === "trk_select_add_result") {
-      const book = JSON.parse(interaction.values[0]);
+      const userId = interaction.user.id;
+      const cache = searchCache.get(userId) || [];
+      const selectedId = interaction.values[0];
+      const book = cache.find((b) => b.id === selectedId);
+      if (!book) {
+        return interaction.reply({ content: "❌ Could not find that book in cache.", ephemeral: true });
+      }
+
       const confirm = new EmbedBuilder()
         .setTitle(`📘 Add "${book.title}"?`)
         .setDescription(book.author ? `by *${book.author}*` : "")
@@ -320,7 +330,7 @@ export async function handleModalSubmit(interaction) {
 
       const row = new ActionRowBuilder().addComponents(
         new ButtonBuilder()
-          .setCustomId(`trk_confirm_add_${JSON.stringify(book)}`)
+          .setCustomId(`trk_confirm_add_${book.id}`)
           .setLabel("✅ Add")
           .setStyle(ButtonStyle.Success),
         new ButtonBuilder()
