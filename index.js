@@ -1,5 +1,5 @@
 // index.js — HL Book Club (Phase 11 Baseline + Loader Fix)
-// ✅ Fixes “Cannot assign to read only property 'execute'”
+// ✅ Fixes "Cannot assign to read only property 'execute'"
 // ✅ Safely wraps command handlers without mutating ESM imports
 // ✅ Auto-creates /data directory before initialization
 // ✅ Keeps unified modal + component routing and backup scheduler
@@ -131,8 +131,13 @@ client.on(Events.InteractionCreate, async (interaction) => {
       const command = client.commands.get(interaction.commandName);
       if (!command) return;
 
-      const ephemeral = isEphemeral(interaction.commandName);
-      await interaction.deferReply({ ephemeral });
+      // Commands that open modals shouldn't be deferred
+      const modalCommands = ['quote'];
+      
+      if (!modalCommands.includes(interaction.commandName)) {
+        const ephemeral = isEphemeral(interaction.commandName);
+        await interaction.deferReply({ ephemeral });
+      }
 
       return await command.execute(interaction);
     }
