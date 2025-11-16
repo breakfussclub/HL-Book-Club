@@ -1,8 +1,8 @@
-// commands/tracker.js — With Pagination & Duplicate ID Fix
-// ✅ Handles 100+ books without Discord character limit issues
-// ✅ Previous/Next page navigation
-// ✅ Shows 10 books per page
-// ✅ Prevents duplicate select menu values
+// commands/tracker.js — With Status Filters & Sorting
+// ✅ Filter by: Reading, Completed, Planned, All
+// ✅ Sort by: Recent, Title, Progress, Date Added
+// ✅ Pagination for large lists
+// ✅ No duplicate dropdown values
 
 import {
   SlashCommandBuilder,
@@ -22,16 +22,13 @@ import {
   getUserLogs,
   calcBookStats,
 } from "../utils/analytics.js";
-import { hybridSearchMany } from "../utils/search.js";
 
 const PURPLE = 0x8b5cf6;
 const GOLD = 0xf59e0b;
-const DEBUG = process.env.DEBUG === "true";
+const GREEN = 0x10b981;
+const BLUE = 0x3b82f6;
 
 // ===== Utility helpers =====
-const clamp = (n, min, max) => Math.max(min, Math.min(max, n));
-const fmtTime = (d) => new Date(d).toLocaleString();
-
 const progressBarPages = (current, total, width = 18) => {
   if (!total || total <= 0) return "";
   const pct = Math.min(1, Math.max(0, current / total));
@@ -39,67 +36,193 @@ const progressBarPages = (current, total, width = 18) => {
   return "▰".repeat(filled) + "▱".repeat(width - filled);
 };
 
-// ===== Embed & Components =====
+const fmtTime = (d) => new Date(d).toLocaleString();
+
+// ===== Filtering & Sorting =====
 
 const BOOKS_PER_PAGE = 10;
 
-function listEmbed(username, active, selectedId = null, page = 0) {
-  const totalPages = Math.ceil(active.length / BOOKS_PER_PAGE);
+function filterBooks(books, filterType) {
+  switch (filterType) {
+    case "reading":
+      return books.filter((b) => b.status === "reading");
+    case "completed":
+      return books.filter((b) => b.status === "completed");
+    case "planned":
+      return books.filter((b) => b.status === "planned");
+    case "all":
+    default:
+      return books;
+  }
+}
+
+function sortBooks(books, sortType) {
+  const sorted = [...books];
+  
+  switch (sortType) {
+    case "title":
+      return sorted.sort((a, b) => a.title.localeCompare(b.title));
+    
+    case "progress":
+      return sorted.sort((a, b) => {
+        const aPct = a.totalPages ? (a.currentPage / a.totalPages) : 0;
+        const bPct = b.totalPages ? (b.currentPage / b.totalPages) : 0;
+        return bPct - aPct; // Highest progress first
+      });
+    
+    case "added":
+      return sorted.sort((a, b) => 
+        new Date(b.startedAt || 0) - new Date(a.startedAt || 0)
+      );
+    
+    case "recent":
+    default:
+      return sorted.sort((a, b) => 
+        new Date(b.updatedAt || b.startedAt || 0) - new Date(a.updatedAt || a.startedAt || 0)
+      );
+  }
+}
+
+// ===== Embed & Components =====
+
+function listEmbed(username, books, filterType = "reading", sortType = "recent", page = 0) {
+  const filtered = filterBooks(books, filterType);
+  const sorted = sortBooks(filtered, sortType);
+  
+  const totalPages = Math.ceil(sorted.length / BOOKS_PER_PAGE);
   const start = page * BOOKS_PER_PAGE;
   const end = start + BOOKS_PER_PAGE;
-  const pageBooks = active.slice(start, end);
+  const pageBooks = sorted.slice(start, end);
+
+  const filterEmoji = {
+    reading: "📖",
+    completed: "✅",
+    planned: "📚",
+    all: "🌟",
+  };
 
   const e = new EmbedBuilder()
-    .setTitle(`📚 ${username}'s Trackers`)
+    .setTitle(`${filterEmoji[filterType]} ${username}'s Trackers`)
     .setColor(PURPLE);
 
-  if (!active.length) {
-    e.setDescription(
-      "You aren't tracking any books yet.\n\nClick **Add Book** below to start."
-    );
+  if (!sorted.length) {
+    const emptyMsg = {
+      reading: "You're not currently reading any books.\n\nAdd a book or sync from Goodreads!",
+      completed: "You haven't completed any books yet.\n\nKeep reading! 📖",
+      planned: "You don't have any planned books.\n\nAdd some to your reading list!",
+      all: "You aren't tracking any books yet.\n\nClick **Add Book** below to start.",
+    };
+    e.setDescription(emptyMsg[filterType] || emptyMsg.all);
     return e;
   }
 
   const lines = pageBooks
     .map((t, idx) => {
       const globalIdx = start + idx + 1;
-      const sel = t.id === selectedId ? " **(selected)**" : "";
       const cp = Number(t.currentPage || 0);
       const tp = Number(t.totalPages || 0);
       const bar = tp ? `${progressBarPages(cp, tp)} ` : "";
-      const done = tp && cp >= tp ? " ✅ Completed" : "";
+      const pct = tp ? ` (${Math.round((cp / tp) * 100)}%)` : "";
       const author = t.author ? ` — *${t.author}*` : "";
+      const statusEmoji = {
+        reading: "📖",
+        completed: "✅",
+        planned: "📚",
+      }[t.status] || "";
+      
       return `**${globalIdx}.** ${t.title}${author}\n   ${bar}Page ${cp}${
-        tp ? `/${tp}` : ""
-      }${done}${sel}`;
+        tp ? `/${tp}${pct}` : ""
+      } ${statusEmoji}`;
     })
     .join("\n\n");
 
   e.setDescription(lines);
+  
+  const sortLabel = {
+    recent: "Recently Updated",
+    title: "Title (A-Z)",
+    progress: "Progress %",
+    added: "Date Added",
+  }[sortType] || "Recently Updated";
+  
   e.setFooter({
-    text: `Page ${page + 1}/${totalPages} • ${active.length} total books`,
+    text: `Page ${page + 1}/${totalPages} • ${sorted.length} books • Sorted by: ${sortLabel}`,
   });
 
   return e;
 }
 
-function listComponents(active, page = 0) {
-  const totalPages = Math.ceil(active.length / BOOKS_PER_PAGE);
+function listComponents(books, filterType = "reading", sortType = "recent", page = 0) {
+  const filtered = filterBooks(books, filterType);
+  const sorted = sortBooks(filtered, sortType);
+  
+  const totalPages = Math.ceil(sorted.length / BOOKS_PER_PAGE);
   const start = page * BOOKS_PER_PAGE;
   const end = start + BOOKS_PER_PAGE;
-  const pageBooks = active.slice(start, end);
+  const pageBooks = sorted.slice(start, end);
 
   const rows = [];
 
+  // Filter buttons
+  rows.push(
+    new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setCustomId(`trk_filter_reading_${sortType}_0`)
+        .setLabel("📖 Reading")
+        .setStyle(filterType === "reading" ? ButtonStyle.Primary : ButtonStyle.Secondary),
+      new ButtonBuilder()
+        .setCustomId(`trk_filter_completed_${sortType}_0`)
+        .setLabel("✅ Completed")
+        .setStyle(filterType === "completed" ? ButtonStyle.Success : ButtonStyle.Secondary),
+      new ButtonBuilder()
+        .setCustomId(`trk_filter_planned_${sortType}_0`)
+        .setLabel("📚 Planned")
+        .setStyle(filterType === "planned" ? ButtonStyle.Primary : ButtonStyle.Secondary),
+      new ButtonBuilder()
+        .setCustomId(`trk_filter_all_${sortType}_0`)
+        .setLabel("🌟 All")
+        .setStyle(filterType === "all" ? ButtonStyle.Secondary : ButtonStyle.Secondary)
+    )
+  );
+
+  // Sort dropdown
+  rows.push(
+    new ActionRowBuilder().addComponents(
+      new StringSelectMenuBuilder()
+        .setCustomId(`trk_sort_${filterType}`)
+        .setPlaceholder(`Sort: ${sortType === "recent" ? "Recently Updated" : sortType === "title" ? "Title" : sortType === "progress" ? "Progress" : "Date Added"}`)
+        .setOptions([
+          new StringSelectMenuOptionBuilder()
+            .setLabel("Recently Updated")
+            .setValue("recent")
+            .setEmoji("🕐")
+            .setDefault(sortType === "recent"),
+          new StringSelectMenuOptionBuilder()
+            .setLabel("Title (A-Z)")
+            .setValue("title")
+            .setEmoji("🔤")
+            .setDefault(sortType === "title"),
+          new StringSelectMenuOptionBuilder()
+            .setLabel("Progress %")
+            .setValue("progress")
+            .setEmoji("📊")
+            .setDefault(sortType === "progress"),
+          new StringSelectMenuOptionBuilder()
+            .setLabel("Date Added")
+            .setValue("added")
+            .setEmoji("📅")
+            .setDefault(sortType === "added"),
+        ])
+    )
+  );
+
   // Book selector dropdown
   if (pageBooks.length) {
-    const usedValues = new Set(); // Track used values to prevent duplicates
+    const usedValues = new Set();
     
     const options = pageBooks.map((t, idx) => {
-      // Create unique ID by combining tracker ID with index
       let safeId = String(t.id);
       
-      // If ID is too long or already used, create a unique one
       if (safeId.length > 90 || usedValues.has(safeId)) {
         safeId = `idx_${start + idx}_${Date.now().toString(36).slice(-6)}`;
       }
@@ -119,10 +242,8 @@ function listComponents(active, page = 0) {
     rows.push(
       new ActionRowBuilder().addComponents(
         new StringSelectMenuBuilder()
-          .setCustomId("trk_select_view")
-          .setPlaceholder("Select a book tracker…")
-          .setMinValues(1)
-          .setMaxValues(1)
+          .setCustomId(`trk_select_${filterType}_${sortType}`)
+          .setPlaceholder("Select a book to view details…")
           .setOptions(options)
       )
     );
@@ -135,7 +256,7 @@ function listComponents(active, page = 0) {
     if (page > 0) {
       navRow.addComponents(
         new ButtonBuilder()
-          .setCustomId(`trk_page_${page - 1}`)
+          .setCustomId(`trk_filter_${filterType}_${sortType}_${page - 1}`)
           .setLabel("◀ Previous")
           .setStyle(ButtonStyle.Secondary)
       );
@@ -144,7 +265,7 @@ function listComponents(active, page = 0) {
     if (page < totalPages - 1) {
       navRow.addComponents(
         new ButtonBuilder()
-          .setCustomId(`trk_page_${page + 1}`)
+          .setCustomId(`trk_filter_${filterType}_${sortType}_${page + 1}`)
           .setLabel("Next ▶")
           .setStyle(ButtonStyle.Secondary)
       );
@@ -161,7 +282,7 @@ function listComponents(active, page = 0) {
       new ButtonBuilder()
         .setCustomId("trk_add_modal")
         .setLabel("Add Book")
-        .setStyle(ButtonStyle.Primary)
+        .setStyle(ButtonStyle.Success)
     )
   );
 
@@ -174,8 +295,14 @@ function detailEmbed(t, logs, stats) {
     .setColor(GOLD);
 
   if (t.author) e.addFields({ name: "Author", value: t.author, inline: true });
-  if (t.status)
-    e.addFields({ name: "Status", value: t.status, inline: true });
+  if (t.status) {
+    const statusLabel = {
+      reading: "📖 Reading",
+      completed: "✅ Completed",
+      planned: "📚 Planned",
+    }[t.status] || t.status;
+    e.addFields({ name: "Status", value: statusLabel, inline: true });
+  }
   if (t.totalPages)
     e.addFields({
       name: "Total Pages",
@@ -261,9 +388,8 @@ export async function execute(interaction) {
   const userId = interaction.user.id;
   if (!data[userId]) data[userId] = { tracked: [] };
 
-  const active = data[userId].tracked.filter((t) => t.status !== "completed");
-  const embed = listEmbed(interaction.user.username, active, null, 0);
-  const components = listComponents(active, 0);
+  const embed = listEmbed(interaction.user.username, data[userId].tracked, "reading", "recent", 0);
+  const components = listComponents(data[userId].tracked, "reading", "recent", 0);
 
   if (interaction.deferred) {
     await interaction.editReply({ embeds: [embed], components });
@@ -277,13 +403,26 @@ export async function execute(interaction) {
 export async function handleComponent(interaction) {
   const cid = interaction.customId;
 
-  // Pagination
-  if (cid.startsWith("trk_page_")) {
-    const page = parseInt(cid.split("_")[2]);
-    return handlePageChange(interaction, page);
+  // Filter buttons
+  if (cid.startsWith("trk_filter_")) {
+    const parts = cid.split("_");
+    const filterType = parts[2];
+    const sortType = parts[3];
+    const page = parseInt(parts[4]);
+    return handleFilterChange(interaction, filterType, sortType, page);
   }
 
-  if (cid === "trk_select_view") return handleSelectView(interaction);
+  // Sort dropdown
+  if (cid.startsWith("trk_sort_")) {
+    const filterType = cid.split("_")[2];
+    return handleSortChange(interaction, filterType);
+  }
+
+  // Book select
+  if (cid.startsWith("trk_select_")) {
+    return handleSelectView(interaction);
+  }
+
   if (cid === "trk_add_modal") return handleAddModal(interaction);
   if (cid.startsWith("trk_update_")) return handleUpdateModal(interaction);
   if (cid.startsWith("trk_complete_")) return handleComplete(interaction);
@@ -293,18 +432,34 @@ export async function handleComponent(interaction) {
   return false;
 }
 
-// ===== HANDLER: Page Change =====
+// ===== HANDLER: Filter Change =====
 
-async function handlePageChange(interaction, page) {
+async function handleFilterChange(interaction, filterType, sortType, page) {
   await interaction.deferUpdate();
 
   const data = await loadJSON(FILES.TRACKERS, {});
   const userId = interaction.user.id;
   if (!data[userId]) data[userId] = { tracked: [] };
 
-  const active = data[userId].tracked.filter((t) => t.status !== "completed");
-  const embed = listEmbed(interaction.user.username, active, null, page);
-  const components = listComponents(active, page);
+  const embed = listEmbed(interaction.user.username, data[userId].tracked, filterType, sortType, page);
+  const components = listComponents(data[userId].tracked, filterType, sortType, page);
+
+  await interaction.editReply({ embeds: [embed], components });
+  return true;
+}
+
+// ===== HANDLER: Sort Change =====
+
+async function handleSortChange(interaction, filterType) {
+  await interaction.deferUpdate();
+
+  const sortType = interaction.values[0];
+  const data = await loadJSON(FILES.TRACKERS, {});
+  const userId = interaction.user.id;
+  if (!data[userId]) data[userId] = { tracked: [] };
+
+  const embed = listEmbed(interaction.user.username, data[userId].tracked, filterType, sortType, 0);
+  const components = listComponents(data[userId].tracked, filterType, sortType, 0);
 
   await interaction.editReply({ embeds: [embed], components });
   return true;
@@ -319,17 +474,13 @@ async function handleSelectView(interaction) {
   const data = await loadJSON(FILES.TRACKERS, {});
   const userId = interaction.user.id;
   
-  // Handle both indexed values and direct ID match
   let tracker;
   
   if (selectedValue.startsWith("idx_")) {
-    // It's an indexed value like "idx_5_abc123"
     const parts = selectedValue.split("_");
     const pageIndex = parseInt(parts[1]);
-    const active = data[userId]?.tracked.filter((t) => t.status !== "completed");
-    tracker = active[pageIndex];
+    tracker = data[userId]?.tracked[pageIndex];
   } else {
-    // It's a direct tracker ID
     tracker = data[userId]?.tracked.find(
       (t) => String(t.id) === selectedValue || String(t.id).startsWith(selectedValue)
     );
@@ -573,9 +724,8 @@ async function handleBackToList(interaction) {
   const userId = interaction.user.id;
   if (!data[userId]) data[userId] = { tracked: [] };
 
-  const active = data[userId].tracked.filter((t) => t.status !== "completed");
-  const embed = listEmbed(interaction.user.username, active, null, 0);
-  const components = listComponents(active, 0);
+  const embed = listEmbed(interaction.user.username, data[userId].tracked, "reading", "recent", 0);
+  const components = listComponents(data[userId].tracked, "reading", "recent", 0);
 
   await interaction.editReply({ embeds: [embed], components });
   return true;
