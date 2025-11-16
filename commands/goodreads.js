@@ -2,8 +2,8 @@
 // ✅ Link/unlink Goodreads accounts
 // ✅ Manual sync trigger
 // ✅ View sync status
-// ✅ NEW: Improved error messages with actionable guidance
-// ✅ FIXED: Interaction handling to prevent double-reply errors
+// ✅ Improved error messages with actionable guidance
+// ✅ FIXED: Proper interaction handling
 
 import { SlashCommandBuilder, EmbedBuilder } from "discord.js";
 import {
@@ -73,7 +73,6 @@ export async function execute(interaction) {
 
     const reply = { embeds: [embed], flags: 1 << 6 };
 
-    // FIXED: Check interaction state before replying
     try {
       if (interaction.deferred) {
         await interaction.editReply(reply);
@@ -81,7 +80,6 @@ export async function execute(interaction) {
         await interaction.reply(reply);
       }
     } catch (replyError) {
-      // If we can't reply, just log it
       logger.error("Failed to send error message", {
         error: replyError.message,
       });
@@ -98,7 +96,6 @@ async function handleLink(interaction) {
 
   const username = interaction.options.getString("username");
   
-  // Validate Goodreads user
   const validation = await validateGoodreadsUser(username);
 
   if (!validation.valid) {
@@ -106,7 +103,6 @@ async function handleLink(interaction) {
       .setColor(ERROR_RED)
       .setTitle("❌ Could Not Link Goodreads Account");
 
-    // NEW: Specific error messages based on error type
     if (validation.error.includes("404") || validation.error.includes("not found")) {
       embed.setDescription(
         `**User not found:** \`${username}\`\n\n` +
@@ -138,7 +134,6 @@ async function handleLink(interaction) {
     return interaction.editReply({ embeds: [embed] });
   }
 
-  // Save link
   const links = await loadJSON(FILES.GOODREADS_LINKS, {});
   links[interaction.user.id] = {
     discordUserId: interaction.user.id,
@@ -217,7 +212,7 @@ async function handleUnlink(interaction) {
 }
 
 // ─────────────────────────────────────────────────────────────
-//   SYNC COMMAND (FIXED)
+//   SYNC COMMAND
 // ─────────────────────────────────────────────────────────────
 
 async function handleSync(interaction) {
@@ -237,7 +232,6 @@ async function handleSync(interaction) {
     return interaction.editReply({ embeds: [embed] });
   }
 
-  // Perform sync
   const result = await syncUserGoodreads(
     interaction.user.id,
     interaction.client
@@ -248,7 +242,6 @@ async function handleSync(interaction) {
       .setColor(ERROR_RED)
       .setTitle("❌ Sync Failed");
 
-    // NEW: Helpful error messages based on failure type
     if (result.error.includes("404")) {
       embed.setDescription(
         "**Your Goodreads profile could not be found.**\n\n" +
@@ -275,7 +268,6 @@ async function handleSync(interaction) {
     return interaction.editReply({ embeds: [embed] });
   }
 
-  // Success
   const embed = new EmbedBuilder()
     .setColor(result.newBooks > 0 ? SUCCESS_GREEN : INFO_BLUE)
     .setTitle(
@@ -298,7 +290,6 @@ async function handleSync(interaction) {
     );
   }
 
-  // Show per-shelf stats if available
   if (result.shelves) {
     const shelfStats = Object.entries(result.shelves)
       .map(([shelf, data]) => {
@@ -363,7 +354,6 @@ async function handleStatus(interaction) {
     )
     .setFooter({ text: "Use /goodreads unlink to disconnect" });
 
-  // Show per-shelf breakdown if available
   if (link.syncResults) {
     const shelfInfo = Object.entries(link.syncResults)
       .map(([shelf, data]) => {
