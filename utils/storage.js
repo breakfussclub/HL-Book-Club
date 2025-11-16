@@ -20,6 +20,7 @@ export const FILES = {
   STATS: path.join(DATA_DIR, "stats.json"),
   FAVORITES: path.join(DATA_DIR, "favorites.json"),
   GOODREADS_LINKS: path.join(DATA_DIR, "goodreads_links.json"),
+  READING_GOALS: path.join(DATA_DIR, "reading_goals.json"), // ← NEW
 };
 
 // Backward compatibility aliases
@@ -32,14 +33,12 @@ const writeLocks = new Map();
 
 async function acquireWriteLock(filePath, timeoutMs = 5000) {
   const start = Date.now();
-
   while (writeLocks.get(filePath)) {
     if (Date.now() - start > timeoutMs) {
       throw new Error(`Write lock timeout for ${path.basename(filePath)}`);
     }
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
-
   writeLocks.set(filePath, true);
 }
 
@@ -74,7 +73,6 @@ function validateJSON(data, filePath) {
 
   // Specific validation rules
   const basename = path.basename(filePath);
-
   if (basename === "trackers.json") {
     // Should be an object with user IDs as keys
     if (Array.isArray(data)) {
@@ -86,7 +84,6 @@ function validateJSON(data, filePath) {
       throw new Error("reading_logs.json should be an object, not an array");
     }
   }
-
   return true;
 }
 
@@ -135,7 +132,6 @@ export async function loadJSON(filePath, defaultData = {}) {
 
     const data = JSON.parse(rawData);
     validateJSON(data, filePath);
-
     return data;
   } catch (error) {
     logger.error("Failed to load JSON", {
@@ -156,7 +152,6 @@ export async function loadJSON(filePath, defaultData = {}) {
       // Restore from backup
       await fs.copyFile(backupPath, filePath);
       logger.info("Restored from backup", { file: path.basename(filePath) });
-
       return data;
     } catch (backupError) {
       logger.error("Backup restoration failed", {
@@ -171,7 +166,6 @@ export async function loadJSON(filePath, defaultData = {}) {
 // ===== Save JSON with Atomic Write =====
 export async function saveJSON(filePath, data) {
   let lockAcquired = false;
-
   try {
     // Acquire write lock
     await acquireWriteLock(filePath);
@@ -195,7 +189,6 @@ export async function saveJSON(filePath, data) {
     // Atomic write using temp file
     const tmpPath = `${filePath}.tmp`;
     const jsonString = JSON.stringify(data, null, 2);
-
     await fs.writeFile(tmpPath, jsonString, "utf8");
     await fs.rename(tmpPath, filePath);
 
@@ -229,7 +222,6 @@ export async function clearFile(filePath, toArray = false) {
 // ===== Safe Update Pattern =====
 export async function updateJSON(filePath, updateFn) {
   let lockAcquired = false;
-
   try {
     await acquireWriteLock(filePath);
     lockAcquired = true;
@@ -237,7 +229,6 @@ export async function updateJSON(filePath, updateFn) {
     const data = await loadJSON(filePath);
     const updated = await updateFn(data);
     await saveJSON(filePath, updated);
-
     return updated;
   } finally {
     if (lockAcquired) {
@@ -252,7 +243,6 @@ const CACHE_TTL = 5000; // 5 seconds
 
 export async function loadJSONCached(filePath, defaultData = {}) {
   const cached = cache.get(filePath);
-
   if (cached && Date.now() - cached.timestamp < CACHE_TTL) {
     logger.debug("Cache hit", { file: path.basename(filePath) });
     return cached.data;
@@ -260,7 +250,6 @@ export async function loadJSONCached(filePath, defaultData = {}) {
 
   const data = await loadJSON(filePath, defaultData);
   cache.set(filePath, { data, timestamp: Date.now() });
-
   return data;
 }
 
@@ -281,7 +270,6 @@ export async function verifyDataIntegrity() {
       const data = await loadJSON(filePath);
       validateJSON(data, filePath);
       const stats = await fs.stat(filePath);
-
       results.push({
         file: name,
         valid: true,
@@ -297,7 +285,6 @@ export async function verifyDataIntegrity() {
   }
 
   const allValid = results.every((r) => r.valid);
-
   logger.info("Data integrity check completed", {
     allValid,
     results: results.filter((r) => !r.valid),
