@@ -12,6 +12,7 @@ import { logger } from "./logger.js";
 const DATA_DIR = config.storage.dataDir;
 
 // ===== File Paths =====
+
 export const FILES = {
   CLUB: path.join(DATA_DIR, "club.json"),
   TRACKERS: path.join(DATA_DIR, "trackers.json"),
@@ -20,7 +21,8 @@ export const FILES = {
   STATS: path.join(DATA_DIR, "stats.json"),
   FAVORITES: path.join(DATA_DIR, "favorites.json"),
   GOODREADS_LINKS: path.join(DATA_DIR, "goodreads_links.json"),
-  READING_GOALS: path.join(DATA_DIR, "reading_goals.json"), // ← NEW
+  READING_GOALS: path.join(DATA_DIR, "reading_goals.json"),
+  BOOKCLUB: path.join(DATA_DIR, "bookclub.json"), // ← NEW
 };
 
 // Backward compatibility aliases
@@ -29,6 +31,7 @@ FILES.USERS = FILES.STATS;
 FILES.ACTIVITY = FILES.READING_LOGS;
 
 // ===== Write Lock Management =====
+
 const writeLocks = new Map();
 
 async function acquireWriteLock(filePath, timeoutMs = 5000) {
@@ -47,6 +50,7 @@ function releaseWriteLock(filePath) {
 }
 
 // ===== File Size Monitoring =====
+
 const MAX_FILE_SIZE = 50 * 1024 * 1024; // 50MB
 
 async function checkFileSize(filePath) {
@@ -66,6 +70,7 @@ async function checkFileSize(filePath) {
 }
 
 // ===== Data Validation =====
+
 function validateJSON(data, filePath) {
   if (data === null || typeof data !== "object") {
     throw new Error(`Invalid JSON structure in ${path.basename(filePath)}`);
@@ -88,6 +93,7 @@ function validateJSON(data, filePath) {
 }
 
 // ===== Ensure File Exists =====
+
 async function ensureFileExists(filePath, defaultData = {}) {
   try {
     await fs.mkdir(path.dirname(filePath), { recursive: true });
@@ -99,6 +105,7 @@ async function ensureFileExists(filePath, defaultData = {}) {
 }
 
 // ===== Ensure All Files =====
+
 export async function ensureAllFiles() {
   for (const filePath of Object.values(FILES)) {
     await ensureFileExists(filePath);
@@ -107,6 +114,7 @@ export async function ensureAllFiles() {
 }
 
 // ===== Load JSON with Validation =====
+
 export async function loadJSON(filePath, defaultData = {}) {
   try {
     await ensureFileExists(filePath, defaultData);
@@ -164,6 +172,7 @@ export async function loadJSON(filePath, defaultData = {}) {
 }
 
 // ===== Save JSON with Atomic Write =====
+
 export async function saveJSON(filePath, data) {
   let lockAcquired = false;
   try {
@@ -213,6 +222,7 @@ export async function saveJSON(filePath, data) {
 }
 
 // ===== Clear File =====
+
 export async function clearFile(filePath, toArray = false) {
   const blank = toArray ? [] : {};
   await saveJSON(filePath, blank);
@@ -220,6 +230,7 @@ export async function clearFile(filePath, toArray = false) {
 }
 
 // ===== Safe Update Pattern =====
+
 export async function updateJSON(filePath, updateFn) {
   let lockAcquired = false;
   try {
@@ -238,6 +249,7 @@ export async function updateJSON(filePath, updateFn) {
 }
 
 // ===== Optimized Read Pattern with Caching =====
+
 const cache = new Map();
 const CACHE_TTL = 5000; // 5 seconds
 
@@ -262,6 +274,7 @@ export function invalidateCache(filePath = null) {
 }
 
 // ===== Data Integrity Check =====
+
 export async function verifyDataIntegrity() {
   const results = [];
 
@@ -289,11 +302,11 @@ export async function verifyDataIntegrity() {
     allValid,
     results: results.filter((r) => !r.valid),
   });
-
   return { valid: allValid, results };
 }
 
 // ===== Cleanup utilities =====
+
 export async function cleanupTempFiles() {
   try {
     const files = await fs.readdir(DATA_DIR);
