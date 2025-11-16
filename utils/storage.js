@@ -19,6 +19,7 @@ export const FILES = {
   QUOTES: path.join(DATA_DIR, "quotes.json"),
   STATS: path.join(DATA_DIR, "stats.json"),
   FAVORITES: path.join(DATA_DIR, "favorites.json"),
+  GOODREADS_LINKS: path.join(DATA_DIR, "goodreads_links.json"),
 };
 
 // Backward compatibility aliases
