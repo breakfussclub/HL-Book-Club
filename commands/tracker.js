@@ -1,7 +1,7 @@
-// commands/tracker.js — Phase 8 Classic + QoL Restored Build (Stable for Phase 11)
-// ✅ identical logic to your working Phase 8/10 build
-// ✅ adds safe deferred/replied guard for new index.js routing
-// ✅ uses flags (no deprecated ephemeral)
+// commands/tracker.js — With Pagination for Large Book Lists
+// ✅ Handles 100+ books without Discord character limit issues
+// ✅ Previous/Next page navigation
+// ✅ Shows 10 books per page
 
 import {
   SlashCommandBuilder,
@@ -15,7 +15,6 @@ import {
   TextInputBuilder,
   TextInputStyle,
 } from "discord.js";
-
 import { loadJSON, saveJSON, FILES } from "../utils/storage.js";
 import {
   appendReadingLog,
@@ -31,27 +30,24 @@ const DEBUG = process.env.DEBUG === "true";
 // ===== Utility helpers =====
 const clamp = (n, min, max) => Math.max(min, Math.min(max, n));
 const fmtTime = (d) => new Date(d).toLocaleString();
+
 const progressBarPages = (current, total, width = 18) => {
-  if (!total || total <= 0) return "▱".repeat(width);
-  const pct = clamp(current / total, 0, 1);
+  if (!total || total <= 0) return "";
+  const pct = Math.min(1, Math.max(0, current / total));
   const filled = Math.round(pct * width);
   return "▰".repeat(filled) + "▱".repeat(width - filled);
 };
 
-// ===== Data helpers =====
-async function getUserTrackers(userId) {
-  const trackers = await loadJSON(FILES.TRACKERS);
-  return trackers[userId]?.tracked || [];
-}
-async function saveUserTrackers(userId, tracked) {
-  const trackers = await loadJSON(FILES.TRACKERS);
-  trackers[userId] = trackers[userId] || { tracked: [] };
-  trackers[userId].tracked = tracked;
-  await saveJSON(FILES.TRACKERS, trackers);
-}
+// ===== Embed & Components =====
 
-// ===== Embed builders =====
-function listEmbed(username, active, selectedId = null) {
+const BOOKS_PER_PAGE = 10;
+
+function listEmbed(username, active, selectedId = null, page = 0) {
+  const totalPages = Math.ceil(active.length / BOOKS_PER_PAGE);
+  const start = page * BOOKS_PER_PAGE;
+  const end = start + BOOKS_PER_PAGE;
+  const pageBooks = active.slice(start, end);
+
   const e = new EmbedBuilder()
     .setTitle(`📚 ${username}'s Trackers`)
     .setColor(PURPLE);
@@ -63,27 +59,40 @@ function listEmbed(username, active, selectedId = null) {
     return e;
   }
 
-  const lines = active
-    .map((t) => {
+  const lines = pageBooks
+    .map((t, idx) => {
+      const globalIdx = start + idx + 1;
       const sel = t.id === selectedId ? " **(selected)**" : "";
       const cp = Number(t.currentPage || 0);
       const tp = Number(t.totalPages || 0);
       const bar = tp ? `${progressBarPages(cp, tp)} ` : "";
       const done = tp && cp >= tp ? " ✅ Completed" : "";
       const author = t.author ? ` — *${t.author}*` : "";
-      return `• **${t.title}**${author} — ${bar}Page ${cp}${
+      return `**${globalIdx}.** ${t.title}${author}\n   ${bar}Page ${cp}${
         tp ? `/${tp}` : ""
       }${done}${sel}`;
     })
-    .join("\n");
+    .join("\n\n");
+
   e.setDescription(lines);
+  e.setFooter({
+    text: `Page ${page + 1}/${totalPages} • ${active.length} total books`,
+  });
+
   return e;
 }
 
-function listComponents(active) {
+function listComponents(active, page = 0) {
+  const totalPages = Math.ceil(active.length / BOOKS_PER_PAGE);
+  const start = page * BOOKS_PER_PAGE;
+  const end = start + BOOKS_PER_PAGE;
+  const pageBooks = active.slice(start, end);
+
   const rows = [];
-  if (active.length) {
-    const options = active.slice(0, 25).map((t) => {
+
+  // Book selector dropdown
+  if (pageBooks.length) {
+    const options = pageBooks.map((t) => {
       const safeId =
         typeof t.id === "string" && t.id.length > 90
           ? t.id.slice(0, 60) + "_" + Math.random().toString(36).slice(2, 8)
@@ -110,6 +119,34 @@ function listComponents(active) {
     );
   }
 
+  // Pagination buttons
+  if (totalPages > 1) {
+    const navRow = new ActionRowBuilder();
+
+    if (page > 0) {
+      navRow.addComponents(
+        new ButtonBuilder()
+          .setCustomId(`trk_page_${page - 1}`)
+          .setLabel("◀ Previous")
+          .setStyle(ButtonStyle.Secondary)
+      );
+    }
+
+    if (page < totalPages - 1) {
+      navRow.addComponents(
+        new ButtonBuilder()
+          .setCustomId(`trk_page_${page + 1}`)
+          .setLabel("Next ▶")
+          .setStyle(ButtonStyle.Secondary)
+      );
+    }
+
+    if (navRow.components.length > 0) {
+      rows.push(navRow);
+    }
+  }
+
+  // Add Book button
   rows.push(
     new ActionRowBuilder().addComponents(
       new ButtonBuilder()
@@ -118,333 +155,408 @@ function listComponents(active) {
         .setStyle(ButtonStyle.Primary)
     )
   );
+
   return rows;
 }
 
-function detailEmbed(book, stats) {
-  const cp = Number(book.currentPage || 0);
-  const tp = Number(book.totalPages || 0);
+function detailEmbed(t, logs, stats) {
   const e = new EmbedBuilder()
-    .setTitle(`📘 ${book.title}`)
-    .setColor(tp && cp >= tp ? GOLD : PURPLE)
-    .setDescription(
-      [
-        book.author ? `*by ${book.author}*` : null,
-        "",
-        tp
-          ? `${progressBarPages(cp, tp)}  **Page ${cp}/${tp}**`
-          : `**Page ${cp}**`,
-        stats
-          ? `📈 **${
-              tp ? Math.round(clamp(cp / tp, 0, 1) * 100) : 0
-            }% complete**`
-          : null,
-        stats
-          ? `🔥 **${stats.streak} day${
-              stats.streak === 1 ? "" : "s"
-            }** streak • avg **${stats.avgPerDay.toFixed(1)}** pages/day`
-          : null,
-        tp && cp >= tp ? "✅ Completed" : null,
-      ]
-        .filter(Boolean)
-        .join("\n")
-    );
-  if (book.thumbnail) e.setThumbnail(book.thumbnail);
-  e.setFooter({
-    text: `Last updated ⏱ ${fmtTime(book.updatedAt || Date.now())}`,
-  });
+    .setTitle(`📖 ${t.title}`)
+    .setColor(GOLD);
+
+  if (t.author) e.addFields({ name: "Author", value: t.author, inline: true });
+  if (t.status)
+    e.addFields({ name: "Status", value: t.status, inline: true });
+  if (t.totalPages)
+    e.addFields({
+      name: "Total Pages",
+      value: String(t.totalPages),
+      inline: true,
+    });
+
+  const cp = Number(t.currentPage || 0);
+  const tp = Number(t.totalPages || 0);
+  if (tp) {
+    const pct = Math.round((cp / tp) * 100);
+    const bar = progressBarPages(cp, tp);
+    e.addFields({
+      name: "Progress",
+      value: `${bar} ${pct}%\nPage ${cp}/${tp}`,
+      inline: false,
+    });
+  }
+
+  if (stats?.avgPages) {
+    e.addFields({
+      name: "📊 Stats",
+      value:
+        `Avg: ${stats.avgPages.toFixed(1)} pages/session\n` +
+        `Last update: ${fmtTime(t.updatedAt || t.startedAt)}`,
+      inline: false,
+    });
+  }
+
+  const recentLogs = (logs || []).slice(-3).reverse();
+  if (recentLogs.length) {
+    e.addFields({
+      name: "Recent Logs",
+      value: recentLogs
+        .map((l) => `• +${l.pagesRead} pages on ${fmtTime(l.timestamp)}`)
+        .join("\n"),
+      inline: false,
+    });
+  }
+
   return e;
 }
 
-function detailComponents() {
+function detailComponents(trackerId) {
   return [
     new ActionRowBuilder().addComponents(
       new ButtonBuilder()
-        .setCustomId("trk_update_open")
-        .setLabel("🟣 Update Tracker")
+        .setCustomId(`trk_update_${trackerId}`)
+        .setLabel("Update Progress")
         .setStyle(ButtonStyle.Primary),
       new ButtonBuilder()
-        .setCustomId("trk_archive")
-        .setLabel("🗃 Archive Tracker")
-        .setStyle(ButtonStyle.Secondary),
+        .setCustomId(`trk_complete_${trackerId}`)
+        .setLabel("Mark Complete")
+        .setStyle(ButtonStyle.Success),
       new ButtonBuilder()
-        .setCustomId("trk_delete")
-        .setLabel("❌ Delete Tracker")
-        .setStyle(ButtonStyle.Danger),
+        .setCustomId(`trk_delete_${trackerId}`)
+        .setLabel("Remove")
+        .setStyle(ButtonStyle.Danger)
+    ),
+    new ActionRowBuilder().addComponents(
       new ButtonBuilder()
-        .setCustomId("trk_back")
-        .setLabel("↩ Back")
+        .setCustomId("trk_back_to_list")
+        .setLabel("← Back to List")
         .setStyle(ButtonStyle.Secondary)
     ),
   ];
 }
 
-// ===== Renderers =====
-async function safeReply(ctx, payload) {
-  if (ctx.deferred || ctx.replied) return ctx.editReply(payload);
-  if (typeof ctx.update === "function") return ctx.update(payload);
-  return ctx.reply(payload);
-}
-async function renderList(ctx, user, selectedId = null) {
-  const all = await getUserTrackers(user.id);
-  const active = all.filter((t) => !t.archived);
-  const embed = listEmbed(user.username, active, selectedId);
-  const comps = listComponents(active);
-  return safeReply(ctx, { embeds: [embed], components: comps, flags: 1 << 6 });
-}
-async function renderDetail(ctx, user, bookId) {
-  const all = await getUserTrackers(user.id);
-  const book = all.find((t) => t.id === bookId);
-  if (!book) return renderList(ctx, user);
-  const logs = await getUserLogs(user.id);
-  const stats = calcBookStats(logs, book.id);
-  const embed = detailEmbed(book, stats);
-  const comps = detailComponents();
-  return safeReply(ctx, { embeds: [embed], components: comps, flags: 1 << 6 });
-}
+// ===== COMMAND ENTRY =====
 
-// ===== Slash Command =====
 export const definitions = [
   new SlashCommandBuilder()
     .setName("tracker")
-    .setDescription("Your personal reading tracker (pages)"),
+    .setDescription("Manage your reading tracker"),
 ].map((c) => c.toJSON());
 
-// ===== Execute =====
 export async function execute(interaction) {
-  try {
-    await renderList(interaction, interaction.user);
-  } catch (err) {
-    console.error("[tracker.execute]", err);
-    await safeReply(interaction, {
-      content: "⚠️ Couldn't load your trackers. Please try again.",
+  if (!interaction.deferred && !interaction.replied) {
+    await interaction.deferReply({ flags: 1 << 6 });
+  }
+
+  const data = await loadJSON(FILES.TRACKERS, {});
+  const userId = interaction.user.id;
+  if (!data[userId]) data[userId] = { tracked: [] };
+
+  const active = data[userId].tracked.filter((t) => t.status !== "completed");
+  const embed = listEmbed(interaction.user.username, active, null, 0);
+  const components = listComponents(active, 0);
+
+  if (interaction.deferred) {
+    await interaction.editReply({ embeds: [embed], components });
+  } else if (!interaction.replied) {
+    await interaction.reply({ embeds: [embed], components, flags: 1 << 6 });
+  }
+}
+
+// ===== COMPONENT ROUTER =====
+
+export async function handleComponent(interaction) {
+  const cid = interaction.customId;
+
+  // Pagination
+  if (cid.startsWith("trk_page_")) {
+    const page = parseInt(cid.split("_")[2]);
+    return handlePageChange(interaction, page);
+  }
+
+  if (cid === "trk_select_view") return handleSelectView(interaction);
+  if (cid === "trk_add_modal") return handleAddModal(interaction);
+  if (cid.startsWith("trk_update_")) return handleUpdateModal(interaction);
+  if (cid.startsWith("trk_complete_")) return handleComplete(interaction);
+  if (cid.startsWith("trk_delete_")) return handleDelete(interaction);
+  if (cid === "trk_back_to_list") return handleBackToList(interaction);
+
+  return false;
+}
+
+// ===== HANDLER: Page Change =====
+
+async function handlePageChange(interaction, page) {
+  await interaction.deferUpdate();
+
+  const data = await loadJSON(FILES.TRACKERS, {});
+  const userId = interaction.user.id;
+  if (!data[userId]) data[userId] = { tracked: [] };
+
+  const active = data[userId].tracked.filter((t) => t.status !== "completed");
+  const embed = listEmbed(interaction.user.username, active, null, page);
+  const components = listComponents(active, page);
+
+  await interaction.editReply({ embeds: [embed], components });
+  return true;
+}
+
+// ===== HANDLER: Select View =====
+
+async function handleSelectView(interaction) {
+  await interaction.deferUpdate();
+
+  const trackerId = interaction.values[0];
+  const data = await loadJSON(FILES.TRACKERS, {});
+  const userId = interaction.user.id;
+  const tracker = data[userId]?.tracked.find(
+    (t) => String(t.id) === trackerId || String(t.id).startsWith(trackerId)
+  );
+
+  if (!tracker) {
+    return interaction.followUp({
+      content: "❌ Tracker not found.",
       flags: 1 << 6,
     });
   }
+
+  const logs = await getUserLogs(userId, tracker.id);
+  const stats = calcBookStats(logs);
+  const embed = detailEmbed(tracker, logs, stats);
+  const components = detailComponents(tracker.id);
+
+  await interaction.editReply({ embeds: [embed], components });
+  return true;
 }
 
-// ===== Component Handler =====
-export async function handleComponent(i) {
-  try {
-    // --- Add book
-    if (i.isButton() && i.customId === "trk_add_modal") {
-      const modal = new ModalBuilder()
-        .setCustomId("trk_search_modal")
-        .setTitle("Search for a book");
-      const input = new TextInputBuilder()
-        .setCustomId("trk_search_query")
-        .setLabel("Title / Author / ISBN")
+// ===== HANDLER: Add Modal =====
+
+async function handleAddModal(interaction) {
+  const modal = new ModalBuilder()
+    .setCustomId("trk_add_submit")
+    .setTitle("Add New Book");
+
+  modal.addComponents(
+    new ActionRowBuilder().addComponents(
+      new TextInputBuilder()
+        .setCustomId("book_title")
+        .setLabel("Book Title")
         .setStyle(TextInputStyle.Short)
         .setRequired(true)
-        .setPlaceholder("e.g., Of Mice and Men");
-      modal.addComponents(new ActionRowBuilder().addComponents(input));
-      if (!i.replied && !i.deferred) await i.showModal(modal);
-      return;
-    }
-
-    // --- Search modal submit
-    if (i.isModalSubmit() && i.customId === "trk_search_modal") {
-      const q = i.fields.getTextInputValue("trk_search_query").trim();
-      const results = await hybridSearchMany(q, 10);
-      if (!results.length)
-        return safeReply(i, { content: `No results for **${q}**.`, flags: 1 << 6 });
-
-      const lines = results
-        .map(
-          (b, idx) =>
-            `**${idx + 1}.** ${b.title}${
-              b.authors?.length ? ` — ${b.authors.join(", ")}` : ""
-            }`
-        )
-        .join("\n");
-      const e = new EmbedBuilder()
-        .setTitle("Book Search Results")
-        .setColor(0x0ea5e9)
-        .setDescription(lines + "\n\nSelect a book below to create a tracker.");
-      const opts = results.slice(0, 25).map((b, idx) =>
-        new StringSelectMenuOptionBuilder()
-          .setLabel(`${b.title}`.slice(0, 100))
-          .setValue(String(idx))
-          .setDescription((b.authors?.join(", ") || b.source).slice(0, 100))
-      );
-      const row = new ActionRowBuilder().addComponents(
-        new StringSelectMenuBuilder()
-          .setCustomId("trk_search_select")
-          .setPlaceholder("Select a book")
-          .setMinValues(1)
-          .setMaxValues(1)
-          .setOptions(opts)
-      );
-      i.client.searchCache = i.client.searchCache || new Map();
-      i.client.searchCache.set(i.user.id, results);
-      await safeReply(i, { embeds: [e], components: [row], flags: 1 << 6 });
-      return;
-    }
-
-    // --- Select search result
-    if (i.isStringSelectMenu() && i.customId === "trk_search_select") {
-      const idx = Number(i.values?.[0] || -1);
-      const list = i.client.searchCache?.get(i.user.id) || [];
-      const book = list[idx];
-      if (!book) return i.deferUpdate();
-      const modal = new ModalBuilder()
-        .setCustomId("trk_create_modal")
-        .setTitle("Create a new tracker");
-      const page = new TextInputBuilder()
-        .setCustomId("trk_page")
-        .setLabel("Your Current Page *")
+    ),
+    new ActionRowBuilder().addComponents(
+      new TextInputBuilder()
+        .setCustomId("book_author")
+        .setLabel("Author (optional)")
         .setStyle(TextInputStyle.Short)
-        .setRequired(true)
-        .setPlaceholder("e.g., 1");
-      const total = new TextInputBuilder()
-        .setCustomId("trk_total")
+        .setRequired(false)
+    ),
+    new ActionRowBuilder().addComponents(
+      new TextInputBuilder()
+        .setCustomId("book_pages")
         .setLabel("Total Pages (optional)")
         .setStyle(TextInputStyle.Short)
         .setRequired(false)
-        .setPlaceholder(book.pageCount ? String(book.pageCount) : "e.g., 320");
-      modal.addComponents(
-        new ActionRowBuilder().addComponents(page),
-        new ActionRowBuilder().addComponents(total)
-      );
-      if (!i.replied && !i.deferred) await i.showModal(modal);
-      return;
-    }
+    )
+  );
 
-    // --- Create tracker modal
-    if (i.isModalSubmit() && i.customId === "trk_create_modal") {
-      const [book] = i.client.searchCache?.get(i.user.id) || [];
-      if (!book)
-        return safeReply(i, { content: "Search expired. Try again.", flags: 1 << 6 });
-
-      const page = i.fields.getTextInputValue("trk_page").trim();
-      const total = i.fields.getTextInputValue("trk_total").trim();
-      const tracked = await getUserTrackers(i.user.id);
-      if (tracked.some((t) => t.id === book.id && !t.archived))
-        return safeReply(i, {
-          content: `You're already tracking **${book.title}**.`,
-          flags: 1 << 6,
-        });
-
-      const tracker = {
-        id: book.id,
-        title: book.title,
-        author: (book.authors || []).join(", "),
-        thumbnail: book.thumbnail || null,
-        currentPage: clamp(Number(page || 0), 0, Number(total || Infinity)),
-        totalPages: total ? Number(total) : book.pageCount || null,
-        archived: false,
-        status: "active",
-        updatedAt: new Date().toISOString(),
-      };
-      tracked.unshift(tracker);
-      await saveUserTrackers(i.user.id, tracked);
-      await appendReadingLog(i.user.id, tracker.id, tracker.currentPage, tracker.updatedAt);
-      await safeReply(i, {
-        content: `Added **${book.title}** — starting at Page ${page}${
-          total ? `/${total}` : ""
-        }.`,
-        flags: 1 << 6,
-      });
-      setTimeout(() => renderList(i, i.user, book.id).catch(() => {}), 800);
-      return;
-    }
-
-    // --- Select existing tracker
-    if (i.isStringSelectMenu() && i.customId === "trk_select_view") {
-      const selectedId = i.values?.[0];
-      if (!selectedId) return i.deferUpdate();
-      return renderDetail(i, i.user, selectedId);
-    }
-
-    // --- Tracker detail buttons
-    if (
-      i.isButton() &&
-      ["trk_update_open", "trk_archive", "trk_delete", "trk_back"].includes(i.customId)
-    ) {
-      const all = await getUserTrackers(i.user.id);
-      const book = all.find((t) => !t.archived);
-      if (!book && i.customId !== "trk_back")
-        return safeReply(i, { content: "Tracker not found.", flags: 1 << 6 });
-      if (i.customId === "trk_back") return renderList(i, i.user);
-      if (i.customId === "trk_update_open") {
-        const modal = new ModalBuilder()
-          .setCustomId("trk_update_modal")
-          .setTitle("Update Tracker");
-        const page = new TextInputBuilder()
-          .setCustomId("upd_page")
-          .setLabel("Current Page *")
-          .setStyle(TextInputStyle.Short)
-          .setRequired(true)
-          .setValue(String(book.currentPage || 0));
-        const total = new TextInputBuilder()
-          .setCustomId("upd_total")
-          .setLabel("Total Pages (optional)")
-          .setStyle(TextInputStyle.Short)
-          .setRequired(false)
-          .setValue(book.totalPages ? String(book.totalPages) : "");
-        modal.addComponents(
-          new ActionRowBuilder().addComponents(page),
-          new ActionRowBuilder().addComponents(total)
-        );
-        if (!i.replied && !i.deferred) await i.showModal(modal);
-        return;
-      }
-      if (i.customId === "trk_archive") {
-        book.archived = true;
-        book.status = "archived";
-        book.updatedAt = new Date().toISOString();
-        await saveUserTrackers(i.user.id, all);
-        return safeReply(i, {
-          content: `📦 Archived **${book.title}**.`,
-          flags: 1 << 6,
-        });
-      }
-      if (i.customId === "trk_delete") {
-        const idx = all.findIndex((t) => t.id === book.id);
-        if (idx !== -1) all.splice(idx, 1);
-        await saveUserTrackers(i.user.id, all);
-        return safeReply(i, {
-          content: `🗑️ Deleted tracker for **${book.title}**.`,
-          flags: 1 << 6,
-        });
-      }
-    }
-
-    // --- Update tracker modal
-    if (i.isModalSubmit() && i.customId === "trk_update_modal") {
-      const all = await getUserTrackers(i.user.id);
-      const book = all.find((t) => !t.archived);
-      if (!book)
-        return safeReply(i, { content: "Tracker not found.", flags: 1 << 6 });
-      const prevPage = Number(book.currentPage || 0);
-      const page = i.fields.getTextInputValue("upd_page").trim();
-      const total = i.fields.getTextInputValue("upd_total").trim();
-      book.currentPage = clamp(
-        Number(page || 0),
-        0,
-        Number(total || book.totalPages || Infinity)
-      );
-      if (total) book.totalPages = Number(total);
-      book.updatedAt = new Date().toISOString();
-      await saveUserTrackers(i.user.id, all);
-      await appendReadingLog(i.user.id, book.id, book.currentPage, book.updatedAt);
-      const delta = Number(book.currentPage) - prevPage;
-      return safeReply(i, {
-        content: `✅ Updated **${book.title}** → Page ${book.currentPage}${
-          book.totalPages ? `/${book.totalPages}` : ""
-        }${delta > 0 ? ` (+${delta})` : ""}.`,
-        flags: 1 << 6,
-      });
-    }
-
-    if (DEBUG) console.log(`[tracker.component] ${i.customId}`);
-  } catch (err) {
-    console.error("[tracker.handleComponent]", err);
-    try {
-      await safeReply(i, {
-        content: "⚠️ Something went wrong handling that tracker action.",
-        flags: 1 << 6,
-      });
-    } catch {}
-  }
+  await interaction.showModal(modal);
+  return true;
 }
+
+// ===== HANDLER: Add Submit =====
+
+export async function handleModalSubmit(interaction) {
+  if (interaction.customId === "trk_add_submit") {
+    await interaction.deferReply({ flags: 1 << 6 });
+
+    const title = interaction.fields.getTextInputValue("book_title");
+    const author = interaction.fields.getTextInputValue("book_author") || null;
+    const pagesStr = interaction.fields.getTextInputValue("book_pages") || "0";
+    const totalPages = parseInt(pagesStr) || 0;
+
+    const data = await loadJSON(FILES.TRACKERS, {});
+    const userId = interaction.user.id;
+    if (!data[userId]) data[userId] = { tracked: [] };
+
+    const newId = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    const newTracker = {
+      id: newId,
+      title,
+      author,
+      totalPages,
+      currentPage: 0,
+      status: "reading",
+      startedAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+
+    data[userId].tracked.push(newTracker);
+    await saveJSON(FILES.TRACKERS, data);
+
+    await interaction.editReply({
+      content: `✅ Added **${title}** to your tracker!`,
+    });
+
+    return true;
+  }
+
+  if (interaction.customId.startsWith("trk_update_submit_")) {
+    return handleUpdateSubmit(interaction);
+  }
+
+  return false;
+}
+
+// ===== HANDLER: Update Modal =====
+
+async function handleUpdateModal(interaction) {
+  const trackerId = interaction.customId.split("_")[2];
+  const modal = new ModalBuilder()
+    .setCustomId(`trk_update_submit_${trackerId}`)
+    .setTitle("Update Progress");
+
+  modal.addComponents(
+    new ActionRowBuilder().addComponents(
+      new TextInputBuilder()
+        .setCustomId("new_page")
+        .setLabel("Current Page")
+        .setStyle(TextInputStyle.Short)
+        .setRequired(true)
+    )
+  );
+
+  await interaction.showModal(modal);
+  return true;
+}
+
+// ===== HANDLER: Update Submit =====
+
+async function handleUpdateSubmit(interaction) {
+  await interaction.deferReply({ flags: 1 << 6 });
+
+  const trackerId = interaction.customId.split("_")[3];
+  const newPageStr = interaction.fields.getTextInputValue("new_page");
+  const newPage = parseInt(newPageStr);
+
+  if (isNaN(newPage) || newPage < 0) {
+    return interaction.editReply({
+      content: "❌ Invalid page number.",
+    });
+  }
+
+  const data = await loadJSON(FILES.TRACKERS, {});
+  const userId = interaction.user.id;
+  const tracker = data[userId]?.tracked.find((t) => String(t.id) === trackerId);
+
+  if (!tracker) {
+    return interaction.editReply({
+      content: "❌ Tracker not found.",
+    });
+  }
+
+  const oldPage = tracker.currentPage || 0;
+  const pagesRead = Math.max(0, newPage - oldPage);
+
+  tracker.currentPage = newPage;
+  tracker.updatedAt = new Date().toISOString();
+
+  if (tracker.totalPages && newPage >= tracker.totalPages) {
+    tracker.status = "completed";
+    tracker.completedAt = new Date().toISOString();
+  }
+
+  await saveJSON(FILES.TRACKERS, data);
+
+  if (pagesRead > 0) {
+    await appendReadingLog(userId, tracker.id, pagesRead);
+  }
+
+  await interaction.editReply({
+    content: `✅ Updated **${tracker.title}** to page ${newPage}${
+      tracker.status === "completed" ? " 🎉 **Completed!**" : ""
+    }`,
+  });
+
+  return true;
+}
+
+// ===== HANDLER: Complete =====
+
+async function handleComplete(interaction) {
+  await interaction.deferReply({ flags: 1 << 6 });
+
+  const trackerId = interaction.customId.split("_")[2];
+  const data = await loadJSON(FILES.TRACKERS, {});
+  const userId = interaction.user.id;
+  const tracker = data[userId]?.tracked.find((t) => String(t.id) === trackerId);
+
+  if (!tracker) {
+    return interaction.editReply({
+      content: "❌ Tracker not found.",
+    });
+  }
+
+  tracker.status = "completed";
+  tracker.completedAt = new Date().toISOString();
+  if (tracker.totalPages && tracker.currentPage < tracker.totalPages) {
+    tracker.currentPage = tracker.totalPages;
+  }
+
+  await saveJSON(FILES.TRACKERS, data);
+
+  await interaction.editReply({
+    content: `🎉 Marked **${tracker.title}** as completed!`,
+  });
+
+  return true;
+}
+
+// ===== HANDLER: Delete =====
+
+async function handleDelete(interaction) {
+  await interaction.deferReply({ flags: 1 << 6 });
+
+  const trackerId = interaction.customId.split("_")[2];
+  const data = await loadJSON(FILES.TRACKERS, {});
+  const userId = interaction.user.id;
+
+  const idx = data[userId]?.tracked.findIndex(
+    (t) => String(t.id) === trackerId
+  );
+
+  if (idx === -1) {
+    return interaction.editReply({
+      content: "❌ Tracker not found.",
+    });
+  }
+
+  const title = data[userId].tracked[idx].title;
+  data[userId].tracked.splice(idx, 1);
+  await saveJSON(FILES.TRACKERS, data);
+
+  await interaction.editReply({
+    content: `✅ Removed **${title}** from your tracker.`,
+  });
+
+  return true;
+}
+
+// ===== HANDLER: Back to List =====
+
+async function handleBackToList(interaction) {
+  await interaction.deferUpdate();
+
+  const data = await loadJSON(FILES.TRACKERS, {});
+  const userId = interaction.user.id;
+  if (!data[userId]) data[userId] = { tracked: [] };
+
+  const active = data[userId].tracked.filter((t) => t.status !== "completed");
+  const embed = listEmbed(interaction.user.username, active, null, 0);
+  const components = listComponents(active, 0);
+
+  await interaction.editReply({ embeds: [embed], components });
+  return true;
+}
+
+export const commandName = "tracker";
