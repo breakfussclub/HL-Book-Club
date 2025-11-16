@@ -1,8 +1,9 @@
-// index.js — HL Book Club (Phase 11 Baseline + Loader Fix)
+// index.js — HL Book Club (Phase 11 Baseline + Loader Fix + Goodreads Integration)
 // ✅ Fixes "Cannot assign to read only property 'execute'"
 // ✅ Safely wraps command handlers without mutating ESM imports
 // ✅ Auto-creates /data directory before initialization
 // ✅ Keeps unified modal + component routing and backup scheduler
+// ✅ Adds Goodreads RSS sync scheduler
 
 import "dotenv/config";
 import fs from "fs";
@@ -23,6 +24,7 @@ import { setupGlobalErrorHandlers, safeExecute, safeHandleComponent } from "./ut
 import { isEphemeral } from "./utils/commandVisibility.js";
 import { logger } from "./utils/logger.js";
 import { startBackupScheduler } from "./utils/backup.js";
+import { startGoodreadsScheduler } from "./utils/goodreadsScheduler.js";
 
 const config = getConfig();
 const __filename = fileURLToPath(import.meta.url);
@@ -181,6 +183,7 @@ client.once(Events.ClientReady, async () => {
 
   await ensureAllFiles();
   startBackupScheduler();
+  startGoodreadsScheduler(client);
 
   logger.info("🚀 Bot fully initialized and ready");
 });
