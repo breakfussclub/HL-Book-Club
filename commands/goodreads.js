@@ -3,6 +3,7 @@
 // ✅ Manual sync trigger
 // ✅ View sync status
 // ✅ NEW: Improved error messages with actionable guidance
+// ✅ FIXED: Interaction handling to prevent double-reply errors
 
 import { SlashCommandBuilder, EmbedBuilder } from "discord.js";
 import {
@@ -61,7 +62,7 @@ export async function execute(interaction) {
       subcommand,
       error: error.message,
     });
-    
+
     const embed = new EmbedBuilder()
       .setColor(ERROR_RED)
       .setTitle("❌ Something Went Wrong")
@@ -71,11 +72,19 @@ export async function execute(interaction) {
       );
 
     const reply = { embeds: [embed], flags: 1 << 6 };
-    
-    if (interaction.deferred || interaction.replied) {
-      await interaction.editReply(reply);
-    } else {
-      await interaction.reply(reply);
+
+    // FIXED: Check interaction state before replying
+    try {
+      if (interaction.deferred) {
+        await interaction.editReply(reply);
+      } else if (!interaction.replied) {
+        await interaction.reply(reply);
+      }
+    } catch (replyError) {
+      // If we can't reply, just log it
+      logger.error("Failed to send error message", {
+        error: replyError.message,
+      });
     }
   }
 }
@@ -208,7 +217,7 @@ async function handleUnlink(interaction) {
 }
 
 // ─────────────────────────────────────────────────────────────
-//   SYNC COMMAND
+//   SYNC COMMAND (FIXED)
 // ─────────────────────────────────────────────────────────────
 
 async function handleSync(interaction) {
