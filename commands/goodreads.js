@@ -1,26 +1,30 @@
-// commands/goodreads.js — Goodreads Integration
-// ✅ Link/unlink Goodreads profiles for automatic sync
-// ✅ Manual sync trigger for immediate updates
-// ✅ View linked profile status
+// commands/goodreads.js — Goodreads Integration Commands
+// ✅ Link/unlink Goodreads accounts
+// ✅ Manual sync trigger
+// ✅ View sync status
+// ✅ NEW: Improved error messages with actionable guidance
 
+import { SlashCommandBuilder, EmbedBuilder } from "discord.js";
 import {
-  SlashCommandBuilder,
-  EmbedBuilder,
-} from "discord.js";
+  validateGoodreadsUser,
+  syncUserGoodreads,
+} from "../utils/goodreadsSync.js";
 import { loadJSON, saveJSON, FILES } from "../utils/storage.js";
-import { validateGoodreadsUser } from "../utils/goodreadsSync.js";
-import { getConfig } from "../config.js";
+import { logger } from "../utils/logger.js";
 
-const config = getConfig();
+const PURPLE = 0x9b59b6;
+const ERROR_RED = 0xe74c3c;
+const SUCCESS_GREEN = 0x2ecc71;
+const INFO_BLUE = 0x3498db;
 
 export const definitions = [
   new SlashCommandBuilder()
     .setName("goodreads")
-    .setDescription("Manage Goodreads integration")
+    .setDescription("Manage your Goodreads integration")
     .addSubcommand((sub) =>
       sub
         .setName("link")
-        .setDescription("Link your Goodreads profile for automatic sync")
+        .setDescription("Link your Goodreads account")
         .addStringOption((opt) =>
           opt
             .setName("username")
@@ -29,216 +33,341 @@ export const definitions = [
         )
     )
     .addSubcommand((sub) =>
-      sub
-        .setName("unlink")
-        .setDescription("Unlink your Goodreads profile")
+      sub.setName("unlink").setDescription("Unlink your Goodreads account")
     )
     .addSubcommand((sub) =>
-      sub
-        .setName("status")
-        .setDescription("Check your Goodreads link status")
+      sub.setName("sync").setDescription("Manually sync your Goodreads books")
     )
     .addSubcommand((sub) =>
-      sub
-        .setName("sync")
-        .setDescription("Manually sync your Goodreads shelf now")
+      sub.setName("status").setDescription("View your Goodreads sync status")
     ),
 ].map((c) => c.toJSON());
 
 export async function execute(interaction) {
   const subcommand = interaction.options.getSubcommand();
 
-  if (subcommand === "link") {
-    return await handleLink(interaction);
-  } else if (subcommand === "unlink") {
-    return await handleUnlink(interaction);
-  } else if (subcommand === "status") {
-    return await handleStatus(interaction);
-  } else if (subcommand === "sync") {
-    return await handleSync(interaction);
+  try {
+    if (subcommand === "link") {
+      await handleLink(interaction);
+    } else if (subcommand === "unlink") {
+      await handleUnlink(interaction);
+    } else if (subcommand === "sync") {
+      await handleSync(interaction);
+    } else if (subcommand === "status") {
+      await handleStatus(interaction);
+    }
+  } catch (error) {
+    logger.error("Goodreads command error", {
+      subcommand,
+      error: error.message,
+    });
+    
+    const embed = new EmbedBuilder()
+      .setColor(ERROR_RED)
+      .setTitle("❌ Something Went Wrong")
+      .setDescription(
+        "An unexpected error occurred. Please try again later.\n\n" +
+        "If this persists, contact a server admin."
+      );
+
+    const reply = { embeds: [embed], flags: 1 << 6 };
+    
+    if (interaction.deferred || interaction.replied) {
+      await interaction.editReply(reply);
+    } else {
+      await interaction.reply(reply);
+    }
   }
 }
 
 // ─────────────────────────────────────────────────────────────
-//   LINK GOODREADS PROFILE
+//   LINK COMMAND
 // ─────────────────────────────────────────────────────────────
 
 async function handleLink(interaction) {
-  try {
-    const username = interaction.options.getString("username").trim();
-    
-    // Validate and get user info from Goodreads
-    const validationResult = await validateGoodreadsUser(username);
-    
-    if (!validationResult.valid) {
-      return await interaction.editReply({
-        content: `⚠️ ${validationResult.error}`,
-      });
+  await interaction.deferReply({ flags: 1 << 6 });
+
+  const username = interaction.options.getString("username");
+  
+  // Validate Goodreads user
+  const validation = await validateGoodreadsUser(username);
+
+  if (!validation.valid) {
+    const embed = new EmbedBuilder()
+      .setColor(ERROR_RED)
+      .setTitle("❌ Could Not Link Goodreads Account");
+
+    // NEW: Specific error messages based on error type
+    if (validation.error.includes("404") || validation.error.includes("not found")) {
+      embed.setDescription(
+        `**User not found:** \`${username}\`\n\n` +
+        "**Common issues:**\n" +
+        "• Double-check your Goodreads username/ID for typos\n" +
+        "• Make sure you're using your username, not display name\n" +
+        "• Try using your numeric user ID instead (found in your profile URL)\n\n" +
+        "**Example:** `goodreads.com/user/show/12345678-username` → Use `12345678`"
+      );
+    } else if (validation.error.includes("public")) {
+      embed.setDescription(
+        "**Your Goodreads profile is private.**\n\n" +
+        "To sync with Discord, you need to make your profile public:\n\n" +
+        "1. Go to [Goodreads Settings](https://www.goodreads.com/user/edit)\n" +
+        "2. Click **Privacy Settings**\n" +
+        "3. Set your profile to **Public**\n" +
+        "4. Save changes and try linking again"
+      );
+    } else {
+      embed.setDescription(
+        `**Error:** ${validation.error}\n\n` +
+        "**Troubleshooting tips:**\n" +
+        "• Check your internet connection\n" +
+        "• Wait a moment and try again\n" +
+        "• Contact server admin if issue persists"
+      );
     }
 
-    // Load existing links
-    const links = await loadJSON(FILES.GOODREADS_LINKS, {});
-    
-    // Store the link
-    links[interaction.user.id] = {
-      userId: validationResult.userId,
-      username: validationResult.username,
-      rssUrl: validationResult.rssUrl,
-      linkedAt: new Date().toISOString(),
-      lastSync: null,
-      lastSyncBooks: [],
-    };
-
-    await saveJSON(FILES.GOODREADS_LINKS, links);
-
-    const embed = new EmbedBuilder()
-      .setColor(config.colors.success)
-      .setTitle("✅ Goodreads Linked")
-      .setDescription(
-        `Successfully linked to **${validationResult.username}**!\n\n` +
-        `Your "Read" shelf will now sync automatically every ${config.goodreads.pollIntervalMinutes} minutes.\n\n` +
-        `Use \`/goodreads sync\` to trigger an immediate sync.`
-      )
-      .setFooter({ text: `User ID: ${validationResult.userId}` })
-      .setTimestamp();
-
-    await interaction.editReply({ embeds: [embed] });
-  } catch (error) {
-    console.error("[goodreads.link]", error);
-    await interaction.editReply({
-      content: "⚠️ Failed to link Goodreads profile. Please try again.",
-    });
+    return interaction.editReply({ embeds: [embed] });
   }
+
+  // Save link
+  const links = await loadJSON(FILES.GOODREADS_LINKS, {});
+  links[interaction.user.id] = {
+    discordUserId: interaction.user.id,
+    goodreadsUserId: validation.userId,
+    username: validation.username,
+    rssUrl: validation.rssUrl,
+    linkedAt: new Date().toISOString(),
+    lastSync: null,
+    lastSyncBooks: [],
+  };
+  await saveJSON(FILES.GOODREADS_LINKS, links);
+
+  const embed = new EmbedBuilder()
+    .setColor(SUCCESS_GREEN)
+    .setTitle("✅ Goodreads Account Linked!")
+    .setDescription(
+      `Successfully linked to **${validation.username}**\n\n` +
+      "Your books will sync automatically every 30 minutes.\n" +
+      "Use `/goodreads sync` to sync immediately.\n\n" +
+      "**What gets synced:**\n" +
+      "📚 To-Read shelf → Planned books\n" +
+      "📖 Currently Reading → Active reading\n" +
+      "✅ Read shelf → Completed books"
+    )
+    .setFooter({ text: "Use /goodreads status to view sync info" });
+
+  await interaction.editReply({ embeds: [embed] });
+
+  logger.info("Goodreads linked", {
+    discordUserId: interaction.user.id,
+    goodreadsUser: validation.username,
+  });
 }
 
 // ─────────────────────────────────────────────────────────────
-//   UNLINK GOODREADS PROFILE
+//   UNLINK COMMAND
 // ─────────────────────────────────────────────────────────────
 
 async function handleUnlink(interaction) {
-  try {
-    const links = await loadJSON(FILES.GOODREADS_LINKS, {});
-    
-    if (!links[interaction.user.id]) {
-      return await interaction.editReply({
-        content: "⚠️ You don't have a linked Goodreads profile.",
-      });
-    }
+  await interaction.deferReply({ flags: 1 << 6 });
 
-    const username = links[interaction.user.id].username;
-    delete links[interaction.user.id];
-    
-    await saveJSON(FILES.GOODREADS_LINKS, links);
+  const links = await loadJSON(FILES.GOODREADS_LINKS, {});
 
+  if (!links[interaction.user.id]) {
     const embed = new EmbedBuilder()
-      .setColor(config.colors.warning)
-      .setTitle("🔗 Goodreads Unlinked")
+      .setColor(INFO_BLUE)
+      .setTitle("ℹ️ No Goodreads Account Linked")
       .setDescription(
-        `Successfully unlinked from **${username}**.\n\n` +
-        `Your Goodreads shelf will no longer sync automatically.`
-      )
-      .setTimestamp();
+        "You don't have a Goodreads account linked.\n\n" +
+        "Use `/goodreads link [username]` to connect your account."
+      );
 
-    await interaction.editReply({ embeds: [embed] });
-  } catch (error) {
-    console.error("[goodreads.unlink]", error);
-    await interaction.editReply({
-      content: "⚠️ Failed to unlink Goodreads profile. Please try again.",
-    });
+    return interaction.editReply({ embeds: [embed] });
   }
+
+  const username = links[interaction.user.id].username;
+  delete links[interaction.user.id];
+  await saveJSON(FILES.GOODREADS_LINKS, links);
+
+  const embed = new EmbedBuilder()
+    .setColor(SUCCESS_GREEN)
+    .setTitle("✅ Goodreads Account Unlinked")
+    .setDescription(
+      `Successfully unlinked from **${username}**\n\n` +
+      "Your existing synced books will remain in your tracker.\n" +
+      "Automatic syncing has been stopped.\n\n" +
+      "You can re-link anytime with `/goodreads link`."
+    );
+
+  await interaction.editReply({ embeds: [embed] });
+
+  logger.info("Goodreads unlinked", {
+    discordUserId: interaction.user.id,
+    goodreadsUser: username,
+  });
 }
 
 // ─────────────────────────────────────────────────────────────
-//   CHECK LINK STATUS
-// ─────────────────────────────────────────────────────────────
-
-async function handleStatus(interaction) {
-  try {
-    const links = await loadJSON(FILES.GOODREADS_LINKS, {});
-    const userLink = links[interaction.user.id];
-    
-    if (!userLink) {
-      return await interaction.editReply({
-        content: "⚠️ You don't have a linked Goodreads profile.\n\nUse `/goodreads link` to connect your account.",
-      });
-    }
-
-    const lastSyncTime = userLink.lastSync 
-      ? `<t:${Math.floor(new Date(userLink.lastSync).getTime() / 1000)}:R>`
-      : "Never";
-    
-    const bookCount = userLink.lastSyncBooks?.length || 0;
-
-    const embed = new EmbedBuilder()
-      .setColor(config.colors.info)
-      .setTitle("📚 Goodreads Link Status")
-      .addFields(
-        { name: "Username", value: userLink.username, inline: true },
-        { name: "User ID", value: userLink.userId, inline: true },
-        { name: "Linked Since", value: `<t:${Math.floor(new Date(userLink.linkedAt).getTime() / 1000)}:D>`, inline: true },
-        { name: "Last Sync", value: lastSyncTime, inline: true },
-        { name: "Books Tracked", value: `${bookCount} books`, inline: true },
-        { name: "Auto-Sync", value: `Every ${config.goodreads.pollIntervalMinutes} min`, inline: true }
-      )
-      .setFooter({ text: "Use /goodreads sync to manually sync now" })
-      .setTimestamp();
-
-    await interaction.editReply({ embeds: [embed] });
-  } catch (error) {
-    console.error("[goodreads.status]", error);
-    await interaction.editReply({
-      content: "⚠️ Failed to check status. Please try again.",
-    });
-  }
-}
-
-// ─────────────────────────────────────────────────────────────
-//   MANUAL SYNC
+//   SYNC COMMAND
 // ─────────────────────────────────────────────────────────────
 
 async function handleSync(interaction) {
-  try {
-    const links = await loadJSON(FILES.GOODREADS_LINKS, {});
-    const userLink = links[interaction.user.id];
-    
-    if (!userLink) {
-      return await interaction.editReply({
-        content: "⚠️ You don't have a linked Goodreads profile.\n\nUse `/goodreads link` to connect your account.",
-      });
-    }
+  await interaction.deferReply({ flags: 1 << 6 });
 
-    // Import sync function (avoid circular dependency)
-    const { syncUserGoodreads } = await import("../utils/goodreadsSync.js");
-    
-    await interaction.editReply({
-      content: "🔄 Syncing your Goodreads shelf...",
-    });
+  const links = await loadJSON(FILES.GOODREADS_LINKS, {});
 
-    const result = await syncUserGoodreads(interaction.user.id, interaction.client);
-    
-    if (!result.success) {
-      return await interaction.editReply({
-        content: `⚠️ Sync failed: ${result.error}`,
-      });
-    }
-
+  if (!links[interaction.user.id]) {
     const embed = new EmbedBuilder()
-      .setColor(config.colors.success)
-      .setTitle("✅ Sync Complete")
+      .setColor(INFO_BLUE)
+      .setTitle("ℹ️ No Goodreads Account Linked")
       .setDescription(
-        `Successfully synced with **${userLink.username}**'s Goodreads shelf.`
-      )
-      .addFields(
-        { name: "New Books Found", value: `${result.newBooks || 0}`, inline: true },
-        { name: "Total Books Tracked", value: `${result.totalBooks || 0}`, inline: true }
-      )
-      .setTimestamp();
+        "You need to link your Goodreads account first.\n\n" +
+        "Use `/goodreads link [username]` to get started."
+      );
 
-    await interaction.editReply({ embeds: [embed], content: null });
-  } catch (error) {
-    console.error("[goodreads.sync]", error);
-    await interaction.editReply({
-      content: "⚠️ Sync failed. Please try again later.",
-    });
+    return interaction.editReply({ embeds: [embed] });
   }
+
+  // Perform sync
+  const result = await syncUserGoodreads(
+    interaction.user.id,
+    interaction.client
+  );
+
+  if (!result.success) {
+    const embed = new EmbedBuilder()
+      .setColor(ERROR_RED)
+      .setTitle("❌ Sync Failed");
+
+    // NEW: Helpful error messages based on failure type
+    if (result.error.includes("404")) {
+      embed.setDescription(
+        "**Your Goodreads profile could not be found.**\n\n" +
+        "This might mean:\n" +
+        "• Your profile was deleted or made private\n" +
+        "• Your username changed on Goodreads\n\n" +
+        "Try unlinking and re-linking your account:\n" +
+        "`/goodreads unlink` → `/goodreads link [username]`"
+      );
+    } else if (result.error.includes("timeout") || result.error.includes("ECONNREFUSED")) {
+      embed.setDescription(
+        "**Connection timed out.**\n\n" +
+        "Goodreads might be temporarily unavailable.\n" +
+        "Please wait a few minutes and try again.\n\n" +
+        "If this persists, check [Goodreads Status](https://www.goodreads.com)"
+      );
+    } else {
+      embed.setDescription(
+        `**Error:** ${result.error}\n\n` +
+        "Try again in a moment. If this continues, contact a server admin."
+      );
+    }
+
+    return interaction.editReply({ embeds: [embed] });
+  }
+
+  // Success
+  const embed = new EmbedBuilder()
+    .setColor(result.newBooks > 0 ? SUCCESS_GREEN : INFO_BLUE)
+    .setTitle(
+      result.newBooks > 0
+        ? `✅ Synced ${result.newBooks} New Book${result.newBooks === 1 ? "" : "s"}!`
+        : "✅ Sync Complete"
+    );
+
+  if (result.newBooks > 0) {
+    embed.setDescription(
+      `Added **${result.newBooks}** new book${result.newBooks === 1 ? "" : "s"} to your tracker!\n\n` +
+      `**Total Goodreads books:** ${result.totalBooks}\n\n` +
+      "Check `/tracker` to see your synced books."
+    );
+  } else {
+    embed.setDescription(
+      "**No new books found.**\n\n" +
+      `All ${result.totalBooks} book${result.totalBooks === 1 ? "" : "s"} from your Goodreads shelves are already synced.\n\n` +
+      "Add books to your Goodreads shelves and sync again!"
+    );
+  }
+
+  // Show per-shelf stats if available
+  if (result.shelves) {
+    const shelfStats = Object.entries(result.shelves)
+      .map(([shelf, data]) => {
+        const emoji = shelf === "read" ? "✅" : shelf === "currently-reading" ? "📖" : "📚";
+        return `${emoji} **${shelf}**: ${data.count || 0} books`;
+      })
+      .join("\n");
+    
+    embed.addFields({ name: "Shelf Breakdown", value: shelfStats });
+  }
+
+  await interaction.editReply({ embeds: [embed] });
 }
+
+// ─────────────────────────────────────────────────────────────
+//   STATUS COMMAND
+// ─────────────────────────────────────────────────────────────
+
+async function handleStatus(interaction) {
+  await interaction.deferReply({ flags: 1 << 6 });
+
+  const links = await loadJSON(FILES.GOODREADS_LINKS, {});
+
+  if (!links[interaction.user.id]) {
+    const embed = new EmbedBuilder()
+      .setColor(INFO_BLUE)
+      .setTitle("ℹ️ No Goodreads Account Linked")
+      .setDescription(
+        "You haven't linked a Goodreads account yet.\n\n" +
+        "**Get started:**\n" +
+        "Use `/goodreads link [username]` to sync your reading list!"
+      );
+
+    return interaction.editReply({ embeds: [embed] });
+  }
+
+  const link = links[interaction.user.id];
+  const lastSync = link.lastSync
+    ? new Date(link.lastSync).toLocaleString()
+    : "Never";
+  const bookCount = link.lastSyncBooks?.length || 0;
+
+  const embed = new EmbedBuilder()
+    .setColor(PURPLE)
+    .setTitle("📊 Goodreads Sync Status")
+    .setDescription(
+      `**Linked Account:** ${link.username}\n` +
+      `**Last Sync:** ${lastSync}\n` +
+      `**Total Books Synced:** ${bookCount}`
+    )
+    .addFields(
+      {
+        name: "🔄 Automatic Sync",
+        value: "Runs every 30 minutes",
+        inline: true,
+      },
+      {
+        name: "⚡ Manual Sync",
+        value: "Use `/goodreads sync`",
+        inline: true,
+      }
+    )
+    .setFooter({ text: "Use /goodreads unlink to disconnect" });
+
+  // Show per-shelf breakdown if available
+  if (link.syncResults) {
+    const shelfInfo = Object.entries(link.syncResults)
+      .map(([shelf, data]) => {
+        const emoji = shelf === "read" ? "✅" : shelf === "currently-reading" ? "📖" : "📚";
+        const status = data.success ? `${data.count || 0} books` : "⚠️ Error";
+        return `${emoji} **${shelf}**: ${status}`;
+      })
+      .join("\n");
+    
+    embed.addFields({ name: "Synced Shelves", value: shelfInfo });
+  }
+
+  await interaction.editReply({ embeds: [embed] });
+}
+
+export const commandName = "goodreads";
