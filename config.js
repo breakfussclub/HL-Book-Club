@@ -3,6 +3,7 @@
 // ✅ Fixes getConfig() undefined crash
 // ✅ Adds both autoBackupHours + autoBackupInterval for backward compatibility
 // ✅ Adds Goodreads integration settings
+// ✅ Updated command visibility (search and book are now public)
 
 import dotenv from "dotenv";
 dotenv.config();
@@ -64,17 +65,8 @@ const config = {
   },
 
   commands: {
-    public: ["shelf", "leaderboard", "profile"],
-    private: [
-      "tracker",
-      "search",
-      "book",
-      "quote",
-      "my-quotes",
-      "my-stats",
-      "admin",
-      "goodreads",
-    ],
+    public: ["search", "book", "shelf", "leaderboard", "profile", "show-quotes"],
+    private: ["tracker", "quote", "my-quotes", "my-stats", "goodreads", "admin"],
   },
 
   goodreads: {
