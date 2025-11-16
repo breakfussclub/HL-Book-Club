@@ -2,7 +2,7 @@
 // ✅ Validates Goodreads usernames and fetches RSS feeds
 // ✅ Parses RSS feeds for book data
 // ✅ Detects new books since last sync
-// ✅ Integrates with Discord tracker
+// ✅ Integrates with Discord tracker (FIXED: compatible data structure)
 
 import Parser from "rss-parser";
 import { loadJSON, saveJSON, FILES } from "./storage.js";
@@ -201,34 +201,43 @@ export async function syncUserGoodreads(discordUserId, client) {
 }
 
 // ─────────────────────────────────────────────────────────────
-//   ADD BOOKS TO TRACKER
+//   ADD BOOKS TO TRACKER (FIXED)
 // ─────────────────────────────────────────────────────────────
 
 async function addBooksToTracker(discordUserId, books, client) {
   try {
     const trackers = await loadJSON(FILES.TRACKERS, {});
 
+    // Initialize with correct structure: { tracked: [] }
     if (!trackers[discordUserId]) {
-      trackers[discordUserId] = [];
+      trackers[discordUserId] = { tracked: [] };
     }
+
+    // Get the tracked array
+    const tracked = trackers[discordUserId].tracked || [];
 
     for (const book of books) {
       // Check if book already exists in tracker
-      const exists = trackers[discordUserId].some(
+      const exists = tracked.some(
         (t) =>
           t.title.toLowerCase() === book.title.toLowerCase() &&
           t.author.toLowerCase() === book.author.toLowerCase()
       );
 
       if (!exists) {
-        trackers[discordUserId].push({
+        // Create tracker entry with all required fields
+        tracked.push({
+          id: book.bookId || book.guid, // Required: unique identifier
           title: book.title,
           author: book.author,
+          thumbnail: book.imageUrl || null, // Required: book cover
           totalPages: book.pages || null,
           currentPage: book.pages || 0, // Mark as completed if pages available
           status: book.pages ? "completed" : "reading",
+          archived: false, // Required: tracker filter flag
           startedAt: book.dateAdded || new Date().toISOString(),
           completedAt: book.readAt || (book.pages ? new Date().toISOString() : null),
+          updatedAt: new Date().toISOString(), // Required: last update timestamp
           goodreadsId: book.bookId,
           goodreadsLink: book.link,
           addedVia: "goodreads",
@@ -241,6 +250,8 @@ async function addBooksToTracker(discordUserId, books, client) {
       }
     }
 
+    // Save back to tracked array
+    trackers[discordUserId].tracked = tracked;
     await saveJSON(FILES.TRACKERS, trackers);
 
     // Send notification to channel if configured
