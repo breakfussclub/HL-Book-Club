@@ -1,7 +1,8 @@
-// commands/tracker.js — With Pagination for Large Book Lists
+// commands/tracker.js — With Pagination & Duplicate ID Fix
 // ✅ Handles 100+ books without Discord character limit issues
 // ✅ Previous/Next page navigation
 // ✅ Shows 10 books per page
+// ✅ Prevents duplicate select menu values
 
 import {
   SlashCommandBuilder,
@@ -92,11 +93,19 @@ function listComponents(active, page = 0) {
 
   // Book selector dropdown
   if (pageBooks.length) {
-    const options = pageBooks.map((t) => {
-      const safeId =
-        typeof t.id === "string" && t.id.length > 90
-          ? t.id.slice(0, 60) + "_" + Math.random().toString(36).slice(2, 8)
-          : String(t.id);
+    const usedValues = new Set(); // Track used values to prevent duplicates
+    
+    const options = pageBooks.map((t, idx) => {
+      // Create unique ID by combining tracker ID with index
+      let safeId = String(t.id);
+      
+      // If ID is too long or already used, create a unique one
+      if (safeId.length > 90 || usedValues.has(safeId)) {
+        safeId = `idx_${start + idx}_${Date.now().toString(36).slice(-6)}`;
+      }
+      
+      usedValues.add(safeId);
+
       return new StringSelectMenuOptionBuilder()
         .setLabel(t.title.slice(0, 100))
         .setValue(safeId)
@@ -306,12 +315,25 @@ async function handlePageChange(interaction, page) {
 async function handleSelectView(interaction) {
   await interaction.deferUpdate();
 
-  const trackerId = interaction.values[0];
+  const selectedValue = interaction.values[0];
   const data = await loadJSON(FILES.TRACKERS, {});
   const userId = interaction.user.id;
-  const tracker = data[userId]?.tracked.find(
-    (t) => String(t.id) === trackerId || String(t.id).startsWith(trackerId)
-  );
+  
+  // Handle both indexed values and direct ID match
+  let tracker;
+  
+  if (selectedValue.startsWith("idx_")) {
+    // It's an indexed value like "idx_5_abc123"
+    const parts = selectedValue.split("_");
+    const pageIndex = parseInt(parts[1]);
+    const active = data[userId]?.tracked.filter((t) => t.status !== "completed");
+    tracker = active[pageIndex];
+  } else {
+    // It's a direct tracker ID
+    tracker = data[userId]?.tracked.find(
+      (t) => String(t.id) === selectedValue || String(t.id).startsWith(selectedValue)
+    );
+  }
 
   if (!tracker) {
     return interaction.followUp({
