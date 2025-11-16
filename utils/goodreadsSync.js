@@ -1,10 +1,10 @@
-// utils/goodreadsSync.js — Goodreads RSS Sync Logic
+// utils/goodreadsSync.js — Goodreads RSS Sync Logic (BULLETPROOF VERSION)
 // ✅ Validates Goodreads usernames and fetches RSS feeds
 // ✅ Parses RSS feeds for book data
 // ✅ Detects new books since last sync
-// ✅ Integrates with Discord tracker (FIXED: compatible data structure)
+// ✅ Integrates with Discord tracker
 // ✅ Multi-shelf support (read, currently-reading, to-read)
-// ✅ FIXED: Error handling to prevent notification failures from breaking sync
+// ✅ BULLETPROOF: Every possible error is caught and handled gracefully
 
 import Parser from "rss-parser";
 import { loadJSON, saveJSON, FILES } from "./storage.js";
@@ -48,7 +48,6 @@ export async function validateGoodreadsUser(usernameOrId) {
       };
     }
 
-    // Extract username from feed title
     const username = feed.title.replace("'s read shelf: read", "").trim();
 
     return {
@@ -107,7 +106,7 @@ async function fetchShelfBooks(userId, shelf) {
       pageCount: item.numPages ? parseInt(item.numPages) : null,
       readAt: item.userReadAt || null,
       addedAt: item.userDateAdded || item.pubDate || null,
-      shelf: shelf, // Track which shelf this came from
+      shelf: shelf,
     }));
 
     logger.info("Fetched shelf books", {
@@ -141,11 +140,13 @@ function mapShelfToStatus(shelf) {
 }
 
 // ─────────────────────────────────────────────────────────────
-//   SYNC USER GOODREADS (MULTI-SHELF)
+//   SYNC USER GOODREADS (BULLETPROOF VERSION)
 // ─────────────────────────────────────────────────────────────
 
 export async function syncUserGoodreads(discordUserId, client) {
+  // BULLETPROOF: Wrap EVERYTHING in try-catch
   try {
+    // Step 1: Load link data
     const links = await loadJSON(FILES.GOODREADS_LINKS, {});
     const link = links[discordUserId];
 
@@ -153,23 +154,37 @@ export async function syncUserGoodreads(discordUserId, client) {
       return {
         success: false,
         error: "User not linked to Goodreads",
+        newBooks: 0,
+        totalBooks: 0,
       };
     }
 
     const goodreadsUserId = link.goodreadsUserId;
 
-    // Fetch all 3 shelves
+    // Step 2: Fetch all shelves
     const shelves = ["read", "currently-reading", "to-read"];
     const allBooks = [];
     const shelfResults = {};
 
     for (const shelf of shelves) {
-      const books = await fetchShelfBooks(goodreadsUserId, shelf);
-      shelfResults[shelf] = {
-        success: books.length >= 0,
-        count: books.length,
-      };
-      allBooks.push(...books);
+      try {
+        const books = await fetchShelfBooks(goodreadsUserId, shelf);
+        shelfResults[shelf] = {
+          success: true,
+          count: books.length,
+        };
+        allBooks.push(...books);
+      } catch (shelfError) {
+        logger.error("Shelf fetch failed", {
+          shelf,
+          error: shelfError.message,
+        });
+        shelfResults[shelf] = {
+          success: false,
+          count: 0,
+          error: shelfError.message,
+        };
+      }
     }
 
     logger.info("Multi-shelf sync completed", {
@@ -178,19 +193,27 @@ export async function syncUserGoodreads(discordUserId, client) {
       shelves: shelfResults,
     });
 
-    // Detect new books
+    // Step 3: Detect new books
     const previousBooks = link.lastSyncBooks || [];
     const previousBookIds = new Set(previousBooks.map((b) => b.bookId));
     const newBooks = allBooks.filter((b) => !previousBookIds.has(b.bookId));
 
-    // Update link data
-    link.lastSync = new Date().toISOString();
-    link.lastSyncBooks = allBooks;
-    link.syncResults = shelfResults;
-    await saveJSON(FILES.GOODREADS_LINKS, links);
+    // Step 4: Update link data
+    try {
+      link.lastSync = new Date().toISOString();
+      link.lastSyncBooks = allBooks;
+      link.syncResults = shelfResults;
+      await saveJSON(FILES.GOODREADS_LINKS, links);
+    } catch (saveError) {
+      logger.error("Failed to save link data", {
+        discordUserId,
+        error: saveError.message,
+      });
+      // Continue anyway - this isn't critical
+    }
 
-    // Add to tracker if configured
-    if (newBooks.length > 0 && config.goodreads.autoAddToTracker) {
+    // Step 5: Add to tracker (optional, won't break sync if fails)
+    if (newBooks.length > 0 && config.goodreads?.autoAddToTracker) {
       try {
         await addBooksToTracker(discordUserId, newBooks, client);
       } catch (trackerError) {
@@ -198,90 +221,110 @@ export async function syncUserGoodreads(discordUserId, client) {
           discordUserId,
           error: trackerError.message,
         });
-        // Don't fail the whole sync if tracker update fails
+        // Don't fail the whole sync
       }
     }
 
-    // Send notification to channel if configured
-    if (config.goodreads.notificationChannelId && client) {
+    // Step 6: Send notification (optional, won't break sync if fails)
+    if (newBooks.length > 0 && config.goodreads?.notificationChannelId && client) {
       try {
         await sendSyncNotification(discordUserId, newBooks, client);
       } catch (notificationError) {
-        // FIXED: Don't let notification failures break the sync
         logger.warn("Notification send failed but sync succeeded", {
           discordUserId,
           error: notificationError.message,
         });
+        // Don't fail the sync
       }
     }
 
+    // Success!
     return {
       success: true,
       newBooks: newBooks.length,
       totalBooks: allBooks.length,
       shelves: shelfResults,
     };
+
   } catch (error) {
+    // BULLETPROOF: Catch ANY error and return safe result
     logger.error("Goodreads sync failed", {
       discordUserId,
       error: error.message,
+      stack: error.stack,
     });
 
     return {
       success: false,
-      error: error.message,
+      error: error.message || "Unknown error occurred",
+      newBooks: 0,
+      totalBooks: 0,
     };
   }
 }
 
 // ─────────────────────────────────────────────────────────────
-//   ADD BOOKS TO TRACKER (FIXED DATA STRUCTURE)
+//   ADD BOOKS TO TRACKER
 // ─────────────────────────────────────────────────────────────
 
 async function addBooksToTracker(discordUserId, books, client) {
-  const trackers = await loadJSON(FILES.TRACKERS, {});
+  try {
+    const trackers = await loadJSON(FILES.TRACKERS, {});
 
-  if (!trackers[discordUserId]) {
-    trackers[discordUserId] = { tracked: [] };
-  }
-
-  const existingTitles = new Set(
-    trackers[discordUserId].tracked.map((b) => b.title.toLowerCase())
-  );
-
-  for (const book of books) {
-    if (existingTitles.has(book.title.toLowerCase())) {
-      continue;
+    if (!trackers[discordUserId]) {
+      trackers[discordUserId] = { tracked: [] };
     }
 
-    const status = mapShelfToStatus(book.shelf);
+    const existingTitles = new Set(
+      trackers[discordUserId].tracked.map((b) => b.title.toLowerCase())
+    );
 
-    // FIXED: Use correct data structure matching tracker expectations
-    const trackerBook = {
-      title: book.title,
-      author: book.author,
-      totalPages: book.pageCount || 0,
-      currentPage: status === "completed" ? book.pageCount || 0 : 0,
-      status: status,
-      startedAt: book.addedAt || new Date().toISOString(),
-      completedAt: status === "completed" ? book.readAt || new Date().toISOString() : null,
-      source: "goodreads",
-      goodreadsId: book.bookId,
-      thumbnail: book.thumbnail,
-      description: book.description,
-      rating: book.userRating || null,
-    };
+    let addedCount = 0;
 
-    trackers[discordUserId].tracked.push(trackerBook);
-    existingTitles.add(book.title.toLowerCase());
+    for (const book of books) {
+      if (existingTitles.has(book.title.toLowerCase())) {
+        continue;
+      }
+
+      const status = mapShelfToStatus(book.shelf);
+
+      const trackerBook = {
+        title: book.title,
+        author: book.author,
+        totalPages: book.pageCount || 0,
+        currentPage: status === "completed" ? book.pageCount || 0 : 0,
+        status: status,
+        startedAt: book.addedAt || new Date().toISOString(),
+        completedAt: status === "completed" ? book.readAt || new Date().toISOString() : null,
+        source: "goodreads",
+        goodreadsId: book.bookId,
+        thumbnail: book.thumbnail,
+        description: book.description,
+        rating: book.userRating || null,
+      };
+
+      trackers[discordUserId].tracked.push(trackerBook);
+      existingTitles.add(book.title.toLowerCase());
+      addedCount++;
+    }
+
+    if (addedCount > 0) {
+      await saveJSON(FILES.TRACKERS, trackers);
+    }
+
+    logger.info("Added Goodreads books to tracker", {
+      discordUserId,
+      booksAdded: addedCount,
+    });
+
+    return { success: true, addedCount };
+  } catch (error) {
+    logger.error("Tracker update failed", {
+      discordUserId,
+      error: error.message,
+    });
+    throw error; // Re-throw so caller can handle
   }
-
-  await saveJSON(FILES.TRACKERS, trackers);
-
-  logger.info("Added Goodreads books to tracker", {
-    discordUserId,
-    booksAdded: books.length,
-  });
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -289,10 +332,12 @@ async function addBooksToTracker(discordUserId, books, client) {
 // ─────────────────────────────────────────────────────────────
 
 async function sendSyncNotification(discordUserId, books, client) {
-  if (books.length === 0) return;
+  if (!books || books.length === 0) return;
 
   try {
-    const channelId = config.goodreads.notificationChannelId;
+    const channelId = config.goodreads?.notificationChannelId;
+    if (!channelId) return;
+
     const channel = await client.channels.fetch(channelId);
 
     if (!channel) {
@@ -300,7 +345,6 @@ async function sendSyncNotification(discordUserId, books, client) {
       return;
     }
 
-    // Group books by shelf
     const booksByShelves = {
       read: books.filter((b) => b.shelf === "read"),
       "currently-reading": books.filter((b) => b.shelf === "currently-reading"),
@@ -311,7 +355,6 @@ async function sendSyncNotification(discordUserId, books, client) {
       books.length === 1 ? "" : "s"
     } from Goodreads!\n\n`;
 
-    // Show books by shelf
     for (const [shelf, shelfBooks] of Object.entries(booksByShelves)) {
       if (shelfBooks.length === 0) continue;
 
@@ -337,11 +380,11 @@ async function sendSyncNotification(discordUserId, books, client) {
       bookCount: books.length,
     });
   } catch (error) {
-    // FIXED: Just log the error, don't throw
     logger.error("Notification send error", {
       discordUserId,
       error: error.message,
     });
+    // Don't throw - just log
   }
 }
 
@@ -350,44 +393,64 @@ async function sendSyncNotification(discordUserId, books, client) {
 // ─────────────────────────────────────────────────────────────
 
 export async function syncAllUsers(client) {
-  const links = await loadJSON(FILES.GOODREADS_LINKS, {});
-  const userIds = Object.keys(links);
+  try {
+    const links = await loadJSON(FILES.GOODREADS_LINKS, {});
+    const userIds = Object.keys(links);
 
-  if (userIds.length === 0) {
-    logger.debug("No linked Goodreads users to sync");
-    return;
-  }
-
-  logger.info("Starting scheduled Goodreads sync", {
-    userCount: userIds.length,
-  });
-
-  let successCount = 0;
-  let failCount = 0;
-
-  for (const userId of userIds) {
-    try {
-      const result = await syncUserGoodreads(userId, client);
-      if (result.success) {
-        successCount++;
-      } else {
-        failCount++;
-      }
-    } catch (error) {
-      logger.error("Scheduled sync error", {
-        userId,
-        error: error.message,
-      });
-      failCount++;
+    if (userIds.length === 0) {
+      logger.debug("No linked Goodreads users to sync");
+      return { success: true, total: 0, successCount: 0, failedCount: 0 };
     }
 
-    // Rate limiting
-    await new Promise((resolve) => setTimeout(resolve, 2000));
-  }
+    logger.info("Starting scheduled Goodreads sync", {
+      userCount: userIds.length,
+    });
 
-  logger.info("Scheduled sync completed", {
-    total: userIds.length,
-    success: successCount,
-    failed: failCount,
-  });
+    let successCount = 0;
+    let failCount = 0;
+
+    for (const userId of userIds) {
+      try {
+        const result = await syncUserGoodreads(userId, client);
+        if (result && result.success) {
+          successCount++;
+        } else {
+          failCount++;
+        }
+      } catch (error) {
+        logger.error("Scheduled sync error", {
+          userId,
+          error: error.message,
+        });
+        failCount++;
+      }
+
+      // Rate limiting
+      await new Promise((resolve) => setTimeout(resolve, 2000));
+    }
+
+    logger.info("Scheduled sync completed", {
+      total: userIds.length,
+      success: successCount,
+      failed: failCount,
+    });
+
+    return {
+      success: true,
+      total: userIds.length,
+      successCount,
+      failedCount: failCount,
+    };
+  } catch (error) {
+    logger.error("Scheduled sync failed", {
+      error: error.message,
+    });
+    return {
+      success: false,
+      error: error.message,
+      total: 0,
+      successCount: 0,
+      failedCount: 0,
+    };
+  }
 }
