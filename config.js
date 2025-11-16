@@ -2,6 +2,7 @@
 // ✅ Compatible with both named and default imports
 // ✅ Fixes getConfig() undefined crash
 // ✅ Adds both autoBackupHours + autoBackupInterval for backward compatibility
+// ✅ Adds Goodreads integration settings
 
 import dotenv from "dotenv";
 dotenv.config();
@@ -72,7 +73,15 @@ const config = {
       "my-quotes",
       "my-stats",
       "admin",
+      "goodreads",
     ],
+  },
+
+  goodreads: {
+    enabled: process.env.GOODREADS_SYNC_ENABLED !== "false", // Default: true
+    pollIntervalMinutes: parseInt(process.env.GOODREADS_POLL_INTERVAL || "30", 10),
+    autoAddToTracker: process.env.GOODREADS_AUTO_ADD !== "false", // Default: true
+    notificationChannelId: process.env.GOODREADS_NOTIFICATION_CHANNEL || "",
   },
 };
 
