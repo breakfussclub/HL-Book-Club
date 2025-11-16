@@ -1,10 +1,4 @@
-// index.js — HL Book Club (Phase 11 Baseline + Loader Fix + Goodreads Integration)
-// ✅ Fixes "Cannot assign to read only property 'execute'"
-// ✅ Safely wraps command handlers without mutating ESM imports
-// ✅ Auto-creates /data directory before initialization
-// ✅ Keeps unified modal + component routing and backup scheduler
-// ✅ Adds Goodreads RSS sync scheduler
-
+// index.js — HL Book Club (FIXED: Proper defer handling)
 import "dotenv/config";
 import fs from "fs";
 import path from "path";
@@ -17,7 +11,6 @@ import {
   REST,
   Routes,
 } from "discord.js";
-
 import { getConfig } from "./config.js";
 import { ensureAllFiles } from "./utils/storage.js";
 import { setupGlobalErrorHandlers, safeExecute, safeHandleComponent } from "./utils/errorHandler.js";
@@ -30,11 +23,7 @@ const config = getConfig();
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// ─────────────────────────────────────────────────────────────
-//   INITIAL SETUP
-// ─────────────────────────────────────────────────────────────
-
-// Ensure data dir exists before anything touches it
+// Ensure data dir exists
 try {
   fs.mkdirSync(config.storage.dataDir, { recursive: true });
 } catch (err) {
@@ -48,7 +37,7 @@ const client = new Client({
 client.commands = new Collection();
 
 // ─────────────────────────────────────────────────────────────
-//   COMMAND LOADER (ESM-SAFE)
+// COMMAND LOADER
 // ─────────────────────────────────────────────────────────────
 
 async function loadCommands() {
@@ -63,31 +52,28 @@ async function loadCommands() {
     const filePath = path.join(commandsPath, file);
     try {
       const mod = await import(`file://${filePath}`);
-
-      // Create a shallow clone so we don't mutate ESM import
       const wrapped = { ...mod };
 
       if (typeof mod.execute === "function") {
         wrapped.execute = safeExecute(mod.execute);
       }
+
       if (typeof mod.handleComponent === "function") {
         wrapped.handleComponent = safeHandleComponent(mod.handleComponent);
       }
+
       if (typeof mod.handleModalSubmit === "function") {
         wrapped.handleModalSubmit = safeHandleComponent(mod.handleModalSubmit);
       }
 
-      // Register command definitions
       if (Array.isArray(mod.definitions)) {
         definitions.push(...mod.definitions);
       }
 
-      // Store on client
       const name =
         wrapped.commandName ||
         (mod.definitions?.[0]?.name ?? file.replace(".js", ""));
       client.commands.set(name, wrapped);
-
       logger.info(`Loaded command module: ${file}`);
     } catch (err) {
       logger.error(`Failed to load command ${file}`, { error: err.message });
@@ -98,7 +84,7 @@ async function loadCommands() {
 }
 
 // ─────────────────────────────────────────────────────────────
-//   COMMAND REGISTRATION
+// COMMAND REGISTRATION
 // ─────────────────────────────────────────────────────────────
 
 async function registerCommands(definitions) {
@@ -123,7 +109,7 @@ async function registerCommands(definitions) {
 }
 
 // ─────────────────────────────────────────────────────────────
-//   INTERACTION HANDLING
+// INTERACTION HANDLING (FIXED)
 // ─────────────────────────────────────────────────────────────
 
 client.on(Events.InteractionCreate, async (interaction) => {
@@ -133,14 +119,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
       const command = client.commands.get(interaction.commandName);
       if (!command) return;
 
-      // Commands that open modals shouldn't be deferred
-      const modalCommands = ['quote'];
-      
-      if (!modalCommands.includes(interaction.commandName)) {
-        const ephemeral = isEphemeral(interaction.commandName);
-        await interaction.deferReply({ ephemeral });
-      }
-
+      // FIXED: Don't defer here - let commands handle their own deferring
+      // Commands that need to defer will do so internally
       return await command.execute(interaction);
     }
 
@@ -161,6 +141,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
           const handled = await mod.handleModalSubmit(interaction);
           if (handled) return;
         }
+
         // Fallback: reuse component handler for modals
         if (typeof mod.handleComponent === "function") {
           const handled = await mod.handleComponent(interaction);
@@ -169,22 +150,37 @@ client.on(Events.InteractionCreate, async (interaction) => {
       }
     }
   } catch (err) {
-    logger.error("Interaction handler failed", { error: err.message });
+    logger.error("Interaction error", { error: err.message });
+    
+    // FIXED: Proper error response handling
+    try {
+      if (interaction.deferred) {
+        await interaction.editReply({ 
+          content: "❌ An error occurred while processing your command." 
+        });
+      } else if (!interaction.replied) {
+        await interaction.reply({ 
+          content: "❌ An error occurred while processing your command.",
+          flags: 1 << 6 
+        });
+      }
+    } catch (replyError) {
+      // Can't reply - just log it
+      logger.error("Failed to send error message", { error: replyError.message });
+    }
   }
 });
 
 // ─────────────────────────────────────────────────────────────
-//   BOOTSTRAP
+// BOOTSTRAP
 // ─────────────────────────────────────────────────────────────
 
 client.once(Events.ClientReady, async () => {
   logger.info(`✅ Logged in as ${client.user.tag}`);
   client.user.setActivity(config.discord.activity || "HL Book Club 📚");
-
   await ensureAllFiles();
   startBackupScheduler();
   startGoodreadsScheduler(client);
-
   logger.info("🚀 Bot fully initialized and ready");
 });
 
