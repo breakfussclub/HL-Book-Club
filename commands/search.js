@@ -2,6 +2,7 @@
 // ✅ Forces /search to display publicly regardless of global defaults
 // ✅ Retains ❤️ Favorite logic and Google Books integration
 // ✅ Keeps debug logging + safety guards
+// ✅ FIXED: Amazon links now properly search books category
 
 import {
   SlashCommandBuilder,
@@ -10,6 +11,7 @@ import {
   ActionRowBuilder,
   ButtonStyle,
 } from "discord.js";
+
 import { hybridSearchMany } from "../utils/search.js";
 import { EMBED_THEME } from "../utils/embedThemes.js";
 import { loadJSON, saveJSON, FILES } from "../utils/storage.js";
@@ -38,6 +40,7 @@ export async function execute(interaction) {
     }
 
     const results = await hybridSearchMany(query, 1);
+
     if (!results?.length) {
       return interaction.followUp({
         content: `No results found for **${query}**.`,
@@ -45,10 +48,12 @@ export async function execute(interaction) {
     }
 
     const book = results[0];
+    
+    // ✅ FIXED: Proper Amazon book search
     const isbn = book.industryIdentifiers?.[0]?.identifier;
     const amazonUrl = isbn
-      ? `https://www.amazon.com/s?k=${isbn}`
-      : `https://www.amazon.com/s?k=${encodeURIComponent(book.title)}`;
+      ? `https://www.amazon.com/s?i=stripbooks&rh=p_66:${isbn.replace(/-/g, '')}`
+      : `https://www.amazon.com/s?i=stripbooks&k=${encodeURIComponent(book.title + ' ' + (book.authors?.[0] || ''))}`;
 
     const theme =
       EMBED_THEME.HL_BOOK_CLUB ??
@@ -66,7 +71,7 @@ export async function execute(interaction) {
       .setDescription(
         book.description
           ? book.description.slice(0, 400) +
-              (book.description.length > 400 ? "..." : "")
+            (book.description.length > 400 ? "..." : "")
           : "No summary available."
       )
       .addFields(
@@ -134,6 +139,7 @@ export async function handleComponent(i) {
   try {
     if (i.isButton() && i.customId === "fav_add") {
       const book = i.client.latestSearch?.get(i.user.id);
+
       if (!book)
         return i.reply({
           content: "⚠️ No recent book found. Try searching again.",
