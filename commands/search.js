@@ -2,7 +2,7 @@
 // ✅ Forces /search to display publicly regardless of global defaults
 // ✅ Retains ❤️ Favorite logic and Google Books integration
 // ✅ Keeps debug logging + safety guards
-// ✅ FIXED: Amazon links now properly search books category
+// ✅ FIXED: Amazon links now use proper ISBN filtering
 
 import {
   SlashCommandBuilder,
@@ -49,10 +49,14 @@ export async function execute(interaction) {
 
     const book = results[0];
     
-    // ✅ FIXED: Proper Amazon book search
-    const isbn = book.industryIdentifiers?.[0]?.identifier;
+    // ✅ FIXED: Extract actual ISBN (not EAN), prefer ISBN_10
+    const isbn10 = book.industryIdentifiers?.find(id => id.type === 'ISBN_10')?.identifier;
+    const isbn13 = book.industryIdentifiers?.find(id => id.type === 'ISBN_13')?.identifier;
+    const isbn = isbn10 || isbn13;
+    
+    // Build Amazon URL with proper format
     const amazonUrl = isbn
-      ? `https://www.amazon.com/s?i=stripbooks&rh=p_66:${isbn.replace(/-/g, '')}`
+      ? `https://www.amazon.com/dp/${isbn.replace(/-/g, '')}`
       : `https://www.amazon.com/s?i=stripbooks&k=${encodeURIComponent(book.title + ' ' + (book.authors?.[0] || ''))}`;
 
     const theme =
