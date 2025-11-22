@@ -1,14 +1,15 @@
-// utils/recommendations.js — Book Recommendation Engine
-// ✅ Analyzes user reading patterns
+// utils/recommendations.js — Book Recommendation Engine (SQL Version)
+// ✅ Analyzes user reading patterns from DB
 // ✅ Fetches related books from Google Books
 // ✅ Scores and ranks recommendations
 // ✅ Filters duplicates and already-read books
 
 import fetch from "node-fetch";
-import { loadJSON, FILES } from "./storage.js";
+import { query } from "./db.js";
 import { logger } from "./logger.js";
-import { config } from "../config.js";
+import { getConfig } from "../config.js";
 
+const config = getConfig();
 const GOOGLE_API = "https://www.googleapis.com/books/v1/volumes";
 const API_KEY = config.apis.googleBooks;
 
@@ -17,19 +18,28 @@ const API_KEY = config.apis.googleBooks;
 // ─────────────────────────────────────────────────────────────
 
 export async function getRecommendations(userId, options = {}) {
-  const { genre = null, limit = 5 } = options;
+  const { genre = null, limit = 5, userBooks = null } = options;
 
   try {
-    // Load user's reading history
-    const trackers = await loadJSON(FILES.TRACKERS, {});
-    const userBooks = trackers[userId]?.tracked || [];
+    // Load user's reading history from DB if not provided
+    let books = userBooks;
+    if (!books) {
+      const sql = `
+        SELECT b.title, b.author, b.page_count, rl.status
+        FROM bc_reading_logs rl
+        JOIN bc_books b ON rl.book_id = b.book_id
+        WHERE rl.user_id = $1
+      `;
+      const res = await query(sql, [userId]);
+      books = res.rows;
+    }
 
-    if (userBooks.length === 0) {
+    if (books.length === 0) {
       return [];
     }
 
     // Analyze reading patterns
-    const patterns = analyzeReadingPatterns(userBooks);
+    const patterns = analyzeReadingPatterns(books);
 
     logger.debug("Reading patterns analyzed", {
       userId,
@@ -41,7 +51,7 @@ export async function getRecommendations(userId, options = {}) {
     // Generate recommendations
     const recommendations = await generateRecommendations(
       patterns,
-      userBooks,
+      books,
       { genre, limit: limit * 3 } // Get more to filter down
     );
 
@@ -49,7 +59,7 @@ export async function getRecommendations(userId, options = {}) {
     const scored = scoreRecommendations(recommendations, patterns);
 
     // Filter and deduplicate
-    const filtered = filterRecommendations(scored, userBooks, limit);
+    const filtered = filterRecommendations(scored, books, limit);
 
     return filtered;
   } catch (error) {
@@ -79,17 +89,9 @@ function analyzeReadingPatterns(books) {
       authors[book.author] = (authors[book.author] || 0) + 1;
     }
 
-    // Estimate genres from title/metadata (would be better with actual genre data)
-    // For now, we'll use this in conjunction with Google Books categories
-
-    // Track language preferences
-    if (book.language) {
-      languages[book.language] = (languages[book.language] || 0) + 1;
-    }
-
     // Average page count
-    if (book.totalPages) {
-      totalPages += book.totalPages;
+    if (book.page_count) {
+      totalPages += parseInt(book.page_count);
       pageCount++;
     }
   }
@@ -99,13 +101,8 @@ function analyzeReadingPatterns(books) {
     .sort((a, b) => b[1] - a[1])
     .map(([author]) => author);
 
-  const topGenres = Object.entries(genres)
-    .sort((a, b) => b[1] - a[1])
-    .map(([genre]) => genre);
-
-  const preferredLanguage = Object.keys(languages).length > 0
-    ? Object.entries(languages).sort((a, b) => b[1] - a[1])[0][0]
-    : "en";
+  // Simple genre estimation (since we don't store genres yet)
+  const topGenres = [];
 
   const avgPages = pageCount > 0 ? Math.round(totalPages / pageCount) : null;
 
@@ -113,7 +110,7 @@ function analyzeReadingPatterns(books) {
     completedCount: completed.length,
     topAuthors,
     topGenres,
-    preferredLanguage,
+    preferredLanguage: "en", // Default for now
     avgPages,
     allTitles: completed.map((b) => b.title.toLowerCase()),
   };
@@ -198,9 +195,8 @@ async function generateRecommendations(patterns, userBooks, options = {}) {
 async function searchBooksByAuthor(author, maxResults = 5) {
   try {
     const query = encodeURIComponent(`inauthor:"${author}"`);
-    const url = `${GOOGLE_API}?q=${query}&maxResults=${maxResults}&langRestrict=en${
-      API_KEY ? `&key=${API_KEY}` : ""
-    }`;
+    const url = `${GOOGLE_API}?q=${query}&maxResults=${maxResults}&langRestrict=en${API_KEY ? `&key=${API_KEY}` : ""
+      }`;
 
     const response = await fetch(url);
     const data = await response.json();
@@ -215,9 +211,8 @@ async function searchBooksByAuthor(author, maxResults = 5) {
 async function findSimilarBooks(title, maxResults = 5) {
   try {
     const query = encodeURIComponent(title);
-    const url = `${GOOGLE_API}?q=${query}&maxResults=${maxResults}&langRestrict=en${
-      API_KEY ? `&key=${API_KEY}` : ""
-    }`;
+    const url = `${GOOGLE_API}?q=${query}&maxResults=${maxResults}&langRestrict=en${API_KEY ? `&key=${API_KEY}` : ""
+      }`;
 
     const response = await fetch(url);
     const data = await response.json();
@@ -232,9 +227,8 @@ async function findSimilarBooks(title, maxResults = 5) {
 async function searchBooksByGenre(genre, maxResults = 5) {
   try {
     const query = encodeURIComponent(`subject:${genre}`);
-    const url = `${GOOGLE_API}?q=${query}&maxResults=${maxResults}&orderBy=relevance&langRestrict=en${
-      API_KEY ? `&key=${API_KEY}` : ""
-    }`;
+    const url = `${GOOGLE_API}?q=${query}&maxResults=${maxResults}&orderBy=relevance&langRestrict=en${API_KEY ? `&key=${API_KEY}` : ""
+      }`;
 
     const response = await fetch(url);
     const data = await response.json();
@@ -248,9 +242,8 @@ async function searchBooksByGenre(genre, maxResults = 5) {
 
 async function getTrendingBooks(language = "en", maxResults = 5) {
   try {
-    const url = `${GOOGLE_API}?q=fiction&orderBy=newest&maxResults=${maxResults}&langRestrict=${language}${
-      API_KEY ? `&key=${API_KEY}` : ""
-    }`;
+    const url = `${GOOGLE_API}?q=fiction&orderBy=newest&maxResults=${maxResults}&langRestrict=${language}${API_KEY ? `&key=${API_KEY}` : ""
+      }`;
 
     const response = await fetch(url);
     const data = await response.json();

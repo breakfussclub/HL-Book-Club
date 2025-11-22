@@ -2,8 +2,9 @@
 // ✅ Direct DB queries for speed
 // ✅ Separated UI logic into views/tracker.js
 // ✅ Efficient pagination and filtering
+// ✅ Merged /my-stats into /tracker stats
 
-import { SlashCommandBuilder } from "discord.js";
+import { SlashCommandBuilder, EmbedBuilder } from "discord.js";
 import { query } from "../utils/db.js";
 import {
   listEmbed,
@@ -14,8 +15,20 @@ import {
   updateProgressModal,
 } from "../views/tracker.js";
 import { appendReadingLog, getUserLogs, calcBookStats } from "../utils/analytics.js";
+import { logger } from "../utils/logger.js";
 
 const BOOKS_PER_PAGE = 10;
+const PURPLE = 0x8b5cf6;
+
+const clamp = (n, min, max) => Math.max(min, Math.min(max, n));
+const fmtTime = (d) => new Date(d).toLocaleString();
+
+const progressBarPages = (current, total, width = 18) => {
+  if (!total || total <= 0) return "▱".repeat(width);
+  const pct = clamp(current / total, 0, 1);
+  const filled = Math.round(pct * width);
+  return "▰".repeat(filled) + "▱".repeat(width - filled);
+};
 
 // ===== DB Helpers =====
 
@@ -74,7 +87,13 @@ async function getBookDetails(userId, bookId) {
 export const definitions = [
   new SlashCommandBuilder()
     .setName("tracker")
-    .setDescription("Manage your reading tracker"),
+    .setDescription("Manage your reading tracker")
+    .addSubcommand((sub) =>
+      sub.setName("list").setDescription("List your tracked books")
+    )
+    .addSubcommand((sub) =>
+      sub.setName("stats").setDescription("Show your reading stats for active books")
+    ),
 ].map((c) => c.toJSON());
 
 export async function execute(interaction) {
@@ -82,6 +101,18 @@ export async function execute(interaction) {
     await interaction.deferReply({ flags: 1 << 6 });
   }
 
+  const subcommand = interaction.options.getSubcommand() || "list"; // Default to list if no subcommand (legacy support)
+
+  if (subcommand === "stats") {
+    return handleStats(interaction);
+  } else {
+    return handleList(interaction);
+  }
+}
+
+// ===== HANDLERS =====
+
+async function handleList(interaction) {
   const userId = interaction.user.id;
   // Ensure user exists
   await query(`INSERT INTO bc_users (user_id, username) VALUES ($1, $2) ON CONFLICT (user_id) DO NOTHING`, [userId, interaction.user.username]);
@@ -92,6 +123,62 @@ export async function execute(interaction) {
   const components = listComponents(books, "reading", "recent", 0, totalCount);
 
   await interaction.editReply({ embeds: [embed], components });
+}
+
+async function handleStats(interaction) {
+  try {
+    const userId = interaction.user.id;
+
+    // 1. Get Active Trackers from DB
+    const sql = `
+      SELECT rl.*, b.title, b.author
+      FROM bc_reading_logs rl
+      JOIN bc_books b ON rl.book_id = b.book_id
+      WHERE rl.user_id = $1 AND rl.status = 'reading'
+      ORDER BY rl.updated_at DESC
+      LIMIT 8
+    `;
+    const res = await query(sql, [userId]);
+    const activeBooks = res.rows;
+
+    if (!activeBooks.length) {
+      return await interaction.editReply({
+        content: "You have no active trackers yet. Use `/tracker list` to start one.",
+      });
+    }
+
+    const lines = [];
+    for (const t of activeBooks) {
+      const logs = await getUserLogs(userId, t.book_id);
+      const stats = calcBookStats(logs);
+
+      const cp = Number(t.current_page || 0);
+      const tp = Number(t.total_pages || 0);
+      const pct = tp ? `${Math.round(clamp(cp / tp, 0, 1) * 100)}%` : "—";
+
+      // Find last activity from logs or updated_at
+      const lastAt = logs.length > 0 ? logs[0].timestamp : t.updated_at;
+
+      lines.push([
+        `• **${t.title}** ${t.author ? `— *${t.author}*` : ""}`,
+        `${progressBarPages(cp, tp)} Page ${cp}${tp ? `/${tp}` : ""} (${pct})`,
+        `📈 avg **${stats.avgPerDay.toFixed(1)}**/day • 🔥 **${stats.streak}d** • ⏱ ${lastAt ? fmtTime(lastAt) : "—"
+        }`,
+      ].join("\n"));
+    }
+
+    const e = new EmbedBuilder()
+      .setTitle("📊 My Reading Stats (Active Books)")
+      .setColor(PURPLE)
+      .setDescription(lines.join("\n\n"))
+      .setFooter({ text: `Total active trackers: ${activeBooks.length}` });
+
+    await interaction.editReply({ embeds: [e] });
+
+  } catch (err) {
+    logger.error("[tracker.stats]", err);
+    await interaction.editReply({ content: "⚠️ Failed to load your stats." });
+  }
 }
 
 // ===== COMPONENT ROUTER =====
@@ -118,7 +205,7 @@ export async function handleComponent(interaction) {
   return false;
 }
 
-// ===== HANDLERS =====
+// ===== COMPONENT HANDLERS =====
 
 async function handleFilterChange(interaction, filterType, sortType, page) {
   await interaction.deferUpdate();
