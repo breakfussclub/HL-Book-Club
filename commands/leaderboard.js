@@ -1,13 +1,12 @@
 // commands/leaderboard.js
-// 🏆 Displays top readers (formerly /book leaderboard)
-// ✅ Uses unified gold theme + HL Book Club header
-// ✅ Supports all-time, month, and week ranges
+// 🏆 Displays top readers
+// ✅ Optimized SQL queries
+// ✅ Uses bc_reading_history for accurate page counts
 
-import { SlashCommandBuilder, EmbedBuilder } from "discord.js";
-import { loadJSON, FILES } from "../utils/storage.js";
-import { EMBED_THEME } from "../utils/embedThemes.js";
-
-const DEBUG = process.env.DEBUG === "true";
+import { SlashCommandBuilder } from "discord.js";
+import { query } from "../utils/db.js";
+import { leaderboardEmbed } from "../views/leaderboard.js";
+import { logger } from "../utils/logger.js";
 
 export const definitions = [
   new SlashCommandBuilder()
@@ -25,91 +24,85 @@ export const definitions = [
     ),
 ].map((c) => c.toJSON());
 
+async function getScores(range) {
+  const now = new Date();
+  let since = null;
+
+  if (range === "week") {
+    since = new Date(now.getTime() - 7 * 86400000);
+  } else if (range === "month") {
+    since = new Date(now.getFullYear(), now.getMonth(), 1);
+  }
+
+  // 1. Get Pages Read (from history)
+  let pagesSql = `
+    SELECT user_id, SUM(pages_read) as pages
+    FROM bc_reading_history
+  `;
+  const params = [];
+
+  if (since) {
+    pagesSql += ` WHERE timestamp >= $1`;
+    params.push(since);
+  }
+
+  pagesSql += ` GROUP BY user_id`;
+
+  const pagesRes = await query(pagesSql, params);
+  const pagesMap = new Map();
+  pagesRes.rows.forEach(r => pagesMap.set(r.user_id, parseInt(r.pages)));
+
+  // 2. Get Completed Books (from logs)
+  // Note: This relies on completed_at being set correctly
+  let compSql = `
+    SELECT user_id, COUNT(*) as count
+    FROM bc_reading_logs
+    WHERE status = 'completed'
+  `;
+  const compParams = [];
+
+  if (since) {
+    compSql += ` AND completed_at >= $1`;
+    compParams.push(since);
+  }
+
+  compSql += ` GROUP BY user_id`;
+
+  const compRes = await query(compSql, compParams);
+  const compMap = new Map();
+  compRes.rows.forEach(r => compMap.set(r.user_id, parseInt(r.count)));
+
+  // 3. Combine
+  const allUsers = new Set([...pagesMap.keys(), ...compMap.keys()]);
+  const scores = [];
+
+  for (const uid of allUsers) {
+    scores.push({
+      userId: uid,
+      pages: pagesMap.get(uid) || 0,
+      completed: compMap.get(uid) || 0
+    });
+  }
+
+  // Sort: Pages desc, then Completed desc
+  scores.sort((a, b) => b.pages - a.pages || b.completed - a.completed);
+
+  return scores;
+}
+
 export async function execute(interaction) {
   try {
+    if (!interaction.deferred && !interaction.replied) {
+      await interaction.deferReply();
+    }
+
     const range = interaction.options.getString("range") || "all";
-
-    const trackers = await loadJSON(FILES.TRACKERS);
-    const logsAll = await loadJSON(FILES.READING_LOGS);
-
-    const now = new Date();
-    let since = null;
-    if (range === "week") {
-      since = new Date(now.getTime() - 7 * 86400000);
-    } else if (range === "month") {
-      const tmp = new Date(now);
-      tmp.setDate(1);
-      since = tmp;
-    }
-
-    // 🧮 Compute pages + completions
-    const pagesInRange = (logs) => {
-      const arr = (logs || []).filter((l) => !since || new Date(l.at) >= since);
-      let pages = 0;
-      for (let i = 1; i < arr.length; i++) {
-        const d = arr[i].page - arr[i - 1].page;
-        if (arr[i].bookId === arr[i - 1].bookId && d > 0) pages += d;
-      }
-      return pages;
-    };
-
-    const completedBooks = (uid) => {
-      const u = trackers[uid];
-      if (!u) return 0;
-      const arr = u.tracked || [];
-      return arr.filter(
-        (t) =>
-          t.totalPages &&
-          t.currentPage >= t.totalPages &&
-          (!since || new Date(t.updatedAt) >= since)
-      ).length;
-    };
-
-    const scores = [];
-    for (const uid of Object.keys(trackers)) {
-      const pages = pagesInRange(logsAll[uid]);
-      const comp = completedBooks(uid);
-      if (pages > 0 || comp > 0) scores.push({ uid, pages, comp });
-    }
-
-    if (!scores.length)
-      return interaction.editReply({
-        content: "No progress to rank yet.",
-      });
-
-    scores.sort((a, b) => b.pages - a.pages || b.comp - a.comp);
-
-    // 🥇 Compose leaderboard embed
-    const medals = ["🥇", "🥈", "🥉"];
-    const label =
-      range === "week" ? "This Week" : range === "month" ? "This Month" : "All Time";
-
-    const lines = scores
-      .slice(0, 10)
-      .map(
-        (s, i) =>
-          `${medals[i] || `#${i + 1}`} <@${s.uid}> — **${s.pages} pages**${
-            s.comp ? ` • ${s.comp} completed` : ""
-          }`
-      )
-      .join("\n");
-
-    const embed = new EmbedBuilder()
-      .setTitle(`🏆 Leaderboard — ${label}`)
-      .setColor(EMBED_THEME.gold)
-      .setAuthor({
-        name: "HL Book Club",
-        iconURL: interaction.client.user.displayAvatarURL(),
-      })
-      .setDescription(lines)
-      .setFooter({ text: EMBED_THEME.footer });
+    const scores = await getScores(range);
+    const embed = leaderboardEmbed(interaction, scores, range);
 
     await interaction.editReply({ embeds: [embed] });
-
-    if (DEBUG)
-      console.log(`[leaderboard] displayed (${range}) by ${interaction.user.username}`);
   } catch (err) {
-    console.error("[leaderboard.execute]", err);
+    logger.error("[leaderboard.execute]", err);
     const msg = { content: "⚠️ Something went wrong.", flags: 1 << 6 };
     if (interaction.deferred || interaction.replied)
       await interaction.editReply(msg);
