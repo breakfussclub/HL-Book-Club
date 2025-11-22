@@ -70,9 +70,17 @@ const SCHEMA = `
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
   );
   
-  -- Indexes for performance
   CREATE INDEX IF NOT EXISTS idx_bc_reading_logs_user_id ON bc_reading_logs(user_id);
   CREATE INDEX IF NOT EXISTS idx_bc_reading_logs_status ON bc_reading_logs(status);
+
+  CREATE TABLE IF NOT EXISTS bc_reading_history (
+    id SERIAL PRIMARY KEY,
+    user_id VARCHAR(255) REFERENCES bc_users(user_id),
+    book_id VARCHAR(255),
+    pages_read INTEGER,
+    timestamp TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+  );
+  CREATE INDEX IF NOT EXISTS idx_bc_reading_history_user_book ON bc_reading_history(user_id, book_id);
 `;
 
 export async function initDB() {

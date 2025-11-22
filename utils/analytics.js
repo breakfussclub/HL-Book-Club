@@ -1,10 +1,9 @@
-// utils/analytics.js — Phase 8 Modernized + Compatibility Patch
-// ✅ Provides appendReadingLog, getUserLogs, calcBookStats
-// ✅ Adds backward-compatibility with Phase 8 tracker (streak / avgPerDay)
+// utils/analytics.js — Optimized for PostgreSQL
+// ✅ Uses bc_reading_history table
+// ✅ Efficient stats calculation
 
-import { loadJSON, saveJSON, FILES } from "./storage.js";
-
-const DEBUG = process.env.DEBUG === "true";
+import { query } from "./db.js";
+import { logger } from "./logger.js";
 
 // ---------------------------------------------------------------------------
 // Helper: Format Date
@@ -19,25 +18,16 @@ function shortDate(iso) {
 // ---------------------------------------------------------------------------
 // 📘 appendReadingLog
 // ---------------------------------------------------------------------------
-export async function appendReadingLog(userId, bookId, page) {
+export async function appendReadingLog(userId, bookId, pagesRead) {
   try {
-    const logs = await loadJSON(FILES.READING_LOGS);
-    if (!logs[userId]) logs[userId] = [];
+    await query(`
+      INSERT INTO bc_reading_history (user_id, book_id, pages_read, timestamp)
+      VALUES ($1, $2, $3, NOW())
+    `, [userId, bookId, pagesRead]);
 
-    logs[userId].push({
-      bookId,
-      page,
-      at: new Date().toISOString(),
-    });
-
-    // Keep logs tidy
-    if (logs[userId].length > 2000) logs[userId] = logs[userId].slice(-2000);
-
-    await saveJSON(FILES.READING_LOGS, logs);
-    if (DEBUG)
-      console.log(`[analytics.appendReadingLog] ${userId} → ${bookId} (${page})`);
+    logger.debug(`[analytics] Logged ${pagesRead} pages for ${userId}/${bookId}`);
   } catch (err) {
-    console.error("[analytics.appendReadingLog]", err);
+    logger.error("[analytics.appendReadingLog]", err);
   }
 }
 
@@ -46,39 +36,48 @@ export async function appendReadingLog(userId, bookId, page) {
 // ---------------------------------------------------------------------------
 export async function getUserLogs(userId, bookId = null) {
   try {
-    const logs = await loadJSON(FILES.READING_LOGS);
-    const arr = logs[userId] || [];
-    if (bookId)
-      return arr.filter((l) =>
-        l.bookId.toLowerCase().includes(bookId.toLowerCase())
-      );
-    return arr;
+    let sql = `SELECT * FROM bc_reading_history WHERE user_id = $1`;
+    const params = [userId];
+
+    if (bookId) {
+      sql += ` AND book_id = $2`;
+      params.push(bookId);
+    }
+
+    sql += ` ORDER BY timestamp DESC LIMIT 100`; // Limit history
+
+    const res = await query(sql, params);
+
+    // Map to expected format
+    return res.rows.map(row => ({
+      bookId: row.book_id,
+      pagesRead: row.pages_read,
+      timestamp: row.timestamp,
+      at: row.timestamp // compatibility
+    }));
   } catch (err) {
-    console.error("[analytics.getUserLogs]", err);
+    logger.error("[analytics.getUserLogs]", err);
     return [];
   }
 }
 
 // ---------------------------------------------------------------------------
-// 📙 calcBookStats (Legacy structure expected by tracker.js)
+// 📙 calcBookStats
 // ---------------------------------------------------------------------------
-// Returns an object { streak, avgPerDay } instead of a string
-
-export function calcBookStats(logs, bookId) {
+export function calcBookStats(logs) {
   try {
-    const entries = (logs || []).filter((l) => l.bookId === bookId);
-    if (!entries.length) return { streak: 0, avgPerDay: 0 };
+    if (!logs || !logs.length) return { streak: 0, avgPerDay: 0 };
 
-    const sorted = entries.sort(
-      (a, b) => new Date(a.at).getTime() - new Date(b.at).getTime()
+    const sorted = [...logs].sort(
+      (a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()
     );
 
     // --- Calculate streak
     let streak = 1;
     let bestStreak = 1;
     for (let i = 1; i < sorted.length; i++) {
-      const prev = new Date(sorted[i - 1].at);
-      const curr = new Date(sorted[i].at);
+      const prev = new Date(sorted[i - 1].timestamp);
+      const curr = new Date(sorted[i].timestamp);
       const diff = (curr - prev) / (1000 * 60 * 60 * 24);
       if (diff <= 1.5) streak++;
       else {
@@ -89,34 +88,34 @@ export function calcBookStats(logs, bookId) {
     bestStreak = Math.max(bestStreak, streak);
 
     // --- Calculate average pages per day
-    const totalPages = sorted.reduce((sum, l) => sum + Number(l.page || 0), 0);
-    const days =
-      (new Date(sorted.at(-1).at) - new Date(sorted[0].at)) /
-        (1000 * 60 * 60 * 24) || 1;
+    const totalPages = sorted.reduce((sum, l) => sum + Number(l.pagesRead || 0), 0);
+    const firstDate = new Date(sorted[0].timestamp);
+    const lastDate = new Date(sorted[sorted.length - 1].timestamp);
+    const days = Math.max(1, (lastDate - firstDate) / (1000 * 60 * 60 * 24));
+
     const avgPerDay = totalPages / days;
 
-    return { streak: bestStreak, avgPerDay };
+    return { streak: bestStreak, avgPerDay, avgPages: avgPerDay }; // avgPages alias
   } catch (err) {
-    console.error("[analytics.calcBookStats]", err);
-    return { streak: 0, avgPerDay: 0 };
+    logger.error("[analytics.calcBookStats]", err);
+    return { streak: 0, avgPerDay: 0, avgPages: 0 };
   }
 }
 
 // ---------------------------------------------------------------------------
-// 📒 calcBookStatsSimple (your modern summary version)
+// 📒 calcBookStatsSimple
 // ---------------------------------------------------------------------------
-
 export function calcBookStatsSimple(entry) {
-  if (!entry?.totalPages) return "";
+  if (!entry?.total_pages) return ""; // DB uses total_pages
   const pct = Math.min(
     100,
-    Math.round((entry.currentPage / entry.totalPages) * 100)
+    Math.round((entry.current_page / entry.total_pages) * 100)
   );
-  const start = entry.startedAt ? shortDate(entry.startedAt) : "—";
-  const last = entry.updatedAt ? shortDate(entry.updatedAt) : "—";
+  const start = entry.started_at ? shortDate(entry.started_at) : "—";
+  const last = entry.updated_at ? shortDate(entry.updated_at) : "—";
 
   let msg = `Progress: **${pct}%**`;
-  if (entry.currentPage >= entry.totalPages)
+  if (entry.current_page >= entry.total_pages)
     msg += ` ✅ Completed on ${last}`;
   else msg += ` (started ${start}, updated ${last})`;
 
