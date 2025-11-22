@@ -85,6 +85,7 @@ function validateConfig() {
     { key: "DISCORD_TOKEN", val: config.discord.token },
     { key: "CLIENT_ID", val: config.discord.clientId },
     { key: "GUILD_ID", val: config.discord.guildId },
+    { key: "DATABASE_URL", val: process.env.DATABASE_URL },
   ];
 
   const missing = required.filter((r) => !r.val);

@@ -4,12 +4,14 @@
   "type": "module",
   "main": "index.js",
   "scripts": {
-    "start": "node index.js"
+    "start": "node index.js",
+    "migrate": "node scripts/migrate_json_to_pg.js"
   },
   "dependencies": {
     "discord.js": "^14.15.3",
     "dotenv": "^16.4.5",
     "node-fetch": "^3.3.2",
+    "pg": "^8.16.3",
     "rss-parser": "^3.13.0"
   },
   "engines": {
