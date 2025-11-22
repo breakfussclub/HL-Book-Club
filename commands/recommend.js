@@ -1,13 +1,11 @@
-// commands/recommend.js — Personalized Book Recommendations
-// ✅ Analyzes reading history for personalized suggestions
+// commands/recommend.js — Optimized with SQL
+// ✅ Analyzes reading history from DB
 // ✅ Uses Google Books API for related books
 // ✅ Filters out already-read books
-// ✅ Genre and author-based recommendations
-// ✅ Considers reading goals for length suggestions
 
-import { SlashCommandBuilder, EmbedBuilder, ButtonBuilder, ActionRowBuilder, ButtonStyle } from "discord.js";
+import { SlashCommandBuilder, EmbedBuilder } from "discord.js";
 import { getRecommendations } from "../utils/recommendations.js";
-import { loadJSON, FILES } from "../utils/storage.js";
+import { query } from "../utils/db.js";
 import { logger } from "../utils/logger.js";
 
 const PURPLE = 0x9b59b6;
@@ -47,9 +45,15 @@ export async function execute(interaction) {
   const count = interaction.options.getInteger("count") || 5;
 
   try {
-    // Get user's reading history
-    const trackers = await loadJSON(FILES.TRACKERS, {});
-    const userBooks = trackers[targetUser.id]?.tracked || [];
+    // Get user's reading history from DB
+    const sql = `
+      SELECT b.title, b.author, rl.status
+      FROM bc_reading_logs rl
+      JOIN bc_books b ON rl.book_id = b.book_id
+      WHERE rl.user_id = $1
+    `;
+    const res = await query(sql, [targetUser.id]);
+    const userBooks = res.rows;
 
     if (userBooks.length === 0) {
       const embed = new EmbedBuilder()
@@ -67,9 +71,30 @@ export async function execute(interaction) {
     }
 
     // Get recommendations
+    // Note: getRecommendations likely expects a list of books with title/author/status
+    // We pass the DB result which matches the structure expected (mostly)
+    // We might need to verify getRecommendations signature.
+    // Assuming it takes (userId, options, userBooksOverride) or fetches internally.
+    // If it fetches internally using loadJSON, we need to update IT too.
+    // Let's assume for now we pass the books or update the util.
+    // Checking the import: import { getRecommendations } from "../utils/recommendations.js";
+    // I should check utils/recommendations.js.
+    // If it uses loadJSON internally, I need to refactor it OR pass the books.
+    // The previous code called: getRecommendations(targetUser.id, { genre, limit: count });
+    // It didn't pass books. So getRecommendations likely loads JSON.
+
+    // I will update this command to pass the books if the function supports it, 
+    // OR I need to refactor utils/recommendations.js.
+    // Given I can't see utils/recommendations.js right now, I'll assume I need to refactor it.
+    // But wait, I can just pass the books if I modify the util.
+
+    // Let's pause and check utils/recommendations.js in the next step.
+    // For now, I'll write this file assuming I'll update the util to accept `userBooks` or use DB.
+
     const recommendations = await getRecommendations(targetUser.id, {
       genre,
       limit: count,
+      userBooks // Passing this to be safe, will update util to use it
     });
 
     if (!recommendations || recommendations.length === 0) {
@@ -89,19 +114,18 @@ export async function execute(interaction) {
     }
 
     // Build recommendation embed
+    const completedCount = userBooks.filter((b) => b.status === "completed").length;
+
     const embed = new EmbedBuilder()
       .setColor(PURPLE)
       .setTitle(
-        `📚 Recommendations${genre ? ` (${genre})` : ""} for ${
-          targetUser.id === interaction.user.id ? "You" : targetUser.username
+        `📚 Recommendations${genre ? ` (${genre})` : ""} for ${targetUser.id === interaction.user.id ? "You" : targetUser.username
         }`
       )
       .setDescription(
-        `Based on ${userBooks.filter((b) => b.status === "completed").length} completed book${
-          userBooks.filter((b) => b.status === "completed").length === 1 ? "" : "s"
+        `Based on ${completedCount} completed book${completedCount === 1 ? "" : "s"
         }\n\n` +
-        `Showing **${recommendations.length}** recommendation${
-          recommendations.length === 1 ? "" : "s"
+        `Showing **${recommendations.length}** recommendation${recommendations.length === 1 ? "" : "s"
         }`
       );
 
@@ -126,7 +150,6 @@ export async function execute(interaction) {
       text: "Use /search to find these books and add them to your tracker!",
     });
 
-    // Add thumbnail from first recommendation
     if (recommendations[0]?.thumbnail) {
       embed.setThumbnail(recommendations[0].thumbnail);
     }

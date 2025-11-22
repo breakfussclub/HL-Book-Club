@@ -1,9 +1,7 @@
-// commands/bookclub.js — Book Club Coordination Hub
-// ✅ Current pick management
-// ✅ Book nominations & voting
-// ✅ Club stats & participation
-// ✅ Discussion scheduling
-// ✅ Member engagement tracking
+// commands/bookclub.js — Optimized with SQL
+// ✅ Uses bc_club_info for club data (JSONB)
+// ✅ Uses bc_reading_logs for member tracking
+// ✅ SQL-based voting and nominations
 
 import {
   SlashCommandBuilder,
@@ -17,13 +15,32 @@ import {
   StringSelectMenuBuilder,
   StringSelectMenuOptionBuilder,
 } from "discord.js";
-import { loadJSON, saveJSON, FILES } from "../utils/storage.js";
+import { query } from "../utils/db.js";
 import { logger } from "../utils/logger.js";
 
 const PURPLE = 0x9b59b6;
 const GREEN = 0x2ecc71;
 const GOLD = 0xf59e0b;
 const BLUE = 0x3498db;
+
+// ===== DB Helpers =====
+
+async function getClubData() {
+  const res = await query(`SELECT value FROM bc_club_info WHERE key = 'club_data'`);
+  return res.rows[0]?.value || {
+    currentPick: null,
+    nominations: [],
+    history: [],
+  };
+}
+
+async function saveClubData(data) {
+  await query(
+    `INSERT INTO bc_club_info (key, value) VALUES ('club_data', $1) 
+     ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`,
+    [data]
+  );
+}
 
 // ===== COMMAND DEFINITIONS =====
 
@@ -102,11 +119,7 @@ export async function execute(interaction) {
 async function handleCurrent(interaction) {
   await interaction.deferReply();
 
-  const clubData = await loadJSON(FILES.BOOKCLUB || "bookclub.json", {
-    currentPick: null,
-    nominations: [],
-    history: [],
-  });
+  const clubData = await getClubData();
 
   if (!clubData.currentPick) {
     const embed = new EmbedBuilder()
@@ -123,22 +136,28 @@ async function handleCurrent(interaction) {
   }
 
   const pick = clubData.currentPick;
-  const trackers = await loadJSON(FILES.TRACKERS, {});
 
-  // Count how many members are reading it
+  // Count readers from DB
+  // We assume pick.title/author matches what's in DB books.
+  // Or we match by fuzzy search?
+  // Ideally pick has a book_id if it came from DB, but nominations are free text.
+  // So we match by title/author.
+
+  const sql = `
+    SELECT rl.status, COUNT(*) as count
+    FROM bc_reading_logs rl
+    JOIN bc_books b ON rl.book_id = b.book_id
+    WHERE LOWER(b.title) = LOWER($1) AND LOWER(b.author) = LOWER($2)
+    GROUP BY rl.status
+  `;
+  const res = await query(sql, [pick.title, pick.author]);
+
   let readingCount = 0;
   let completedCount = 0;
 
-  Object.values(trackers).forEach((userData) => {
-    const book = userData.tracked?.find(
-      (b) =>
-        b.title.toLowerCase() === pick.title.toLowerCase() &&
-        b.author?.toLowerCase() === pick.author?.toLowerCase()
-    );
-    if (book) {
-      if (book.status === "reading") readingCount++;
-      if (book.status === "completed") completedCount++;
-    }
+  res.rows.forEach(r => {
+    if (r.status === 'reading') readingCount = parseInt(r.count);
+    if (r.status === 'completed') completedCount = parseInt(r.count);
   });
 
   const embed = new EmbedBuilder()
@@ -185,11 +204,7 @@ async function handleCurrent(interaction) {
 async function handlePicks(interaction) {
   await interaction.deferReply();
 
-  const clubData = await loadJSON(FILES.BOOKCLUB || "bookclub.json", {
-    currentPick: null,
-    nominations: [],
-    history: [],
-  });
+  const clubData = await getClubData();
 
   if (!clubData.nominations || clubData.nominations.length === 0) {
     const embed = new EmbedBuilder()
@@ -277,45 +292,35 @@ async function handlePicks(interaction) {
 async function handleStats(interaction) {
   await interaction.deferReply();
 
-  const trackers = await loadJSON(FILES.TRACKERS, {});
-  const clubData = await loadJSON(FILES.BOOKCLUB || "bookclub.json", {
-    nominations: [],
-    history: [],
-  });
+  const clubData = await getClubData();
 
-  // Calculate stats
-  const totalMembers = Object.keys(trackers).length;
-  let totalBooksRead = 0;
-  let totalPagesRead = 0;
-  let activeReaders = 0;
-
-  const memberStats = [];
-
-  Object.entries(trackers).forEach(([userId, data]) => {
-    const completed = data.tracked?.filter((b) => b.status === "completed") || [];
-    const reading = data.tracked?.filter((b) => b.status === "reading") || [];
-    const pages = data.tracked?.reduce((sum, b) => sum + (b.currentPage || 0), 0) || 0;
-
-    totalBooksRead += completed.length;
-    totalPagesRead += pages;
-    if (reading.length > 0) activeReaders++;
-
-    memberStats.push({
-      userId,
-      booksCompleted: completed.length,
-      pagesRead: pages,
-    });
-  });
+  // Calculate stats from DB
+  const statsSql = `
+    SELECT 
+      COUNT(DISTINCT user_id) as total_members,
+      COUNT(CASE WHEN status = 'reading' THEN 1 END) as active_readers,
+      COUNT(CASE WHEN status = 'completed' THEN 1 END) as total_books_read,
+      SUM(current_page) as total_pages_read
+    FROM bc_reading_logs
+  `;
+  const res = await query(statsSql);
+  const stats = res.rows[0];
 
   // Top readers
-  const topReaders = memberStats
-    .sort((a, b) => b.booksCompleted - a.booksCompleted)
-    .slice(0, 5);
+  const topSql = `
+    SELECT user_id, COUNT(*) as books_completed
+    FROM bc_reading_logs
+    WHERE status = 'completed'
+    GROUP BY user_id
+    ORDER BY books_completed DESC
+    LIMIT 5
+  `;
+  const topRes = await query(topSql);
 
-  const leaderboard = topReaders
+  const leaderboard = topRes.rows
     .map(
       (m, idx) =>
-        `${idx + 1}. <@${m.userId}> — ${m.booksCompleted} book${m.booksCompleted !== 1 ? "s" : ""}, ${m.pagesRead.toLocaleString()} pages`
+        `${idx + 1}. <@${m.user_id}> — ${m.books_completed} book${m.books_completed != 1 ? "s" : ""}`
     )
     .join("\n");
 
@@ -324,10 +329,10 @@ async function handleStats(interaction) {
     .setTitle("📊 HL Book Club Statistics")
     .setDescription(
       `**Club Overview**\n` +
-      `👥 **${totalMembers}** members\n` +
-      `📖 **${activeReaders}** actively reading\n` +
-      `✅ **${totalBooksRead}** books completed\n` +
-      `📄 **${totalPagesRead.toLocaleString()}** total pages read\n` +
+      `👥 **${stats.total_members || 0}** members\n` +
+      `📖 **${stats.active_readers || 0}** actively reading\n` +
+      `✅ **${stats.total_books_read || 0}** books completed\n` +
+      `📄 **${parseInt(stats.total_pages_read || 0).toLocaleString()}** total pages read\n` +
       `📚 **${clubData.nominations?.length || 0}** books nominated\n` +
       `🎯 **${clubData.history?.length || 0}** past club picks`
     )
@@ -350,11 +355,7 @@ async function handleNominate(interaction) {
   const author = interaction.options.getString("author");
   const reason = interaction.options.getString("reason") || "";
 
-  const clubData = await loadJSON(FILES.BOOKCLUB || "bookclub.json", {
-    currentPick: null,
-    nominations: [],
-    history: [],
-  });
+  const clubData = await getClubData();
 
   // Check for duplicates
   const existing = clubData.nominations.find(
@@ -380,7 +381,7 @@ async function handleNominate(interaction) {
   };
 
   clubData.nominations.push(nomination);
-  await saveJSON(FILES.BOOKCLUB || "bookclub.json", clubData);
+  await saveClubData(clubData);
 
   await interaction.editReply({
     content:
@@ -400,7 +401,6 @@ async function handleNominate(interaction) {
 async function handleSelect(interaction) {
   await interaction.deferReply({ flags: 1 << 6 });
 
-  // Check admin permissions (customize as needed)
   if (!interaction.member.permissions.has("ManageGuild")) {
     return interaction.editReply({
       content: "❌ Only admins can select book club picks.",
@@ -410,11 +410,7 @@ async function handleSelect(interaction) {
   const nominationId = interaction.options.getString("nomination_id");
   const discussionDate = interaction.options.getString("discussion_date");
 
-  const clubData = await loadJSON(FILES.BOOKCLUB || "bookclub.json", {
-    currentPick: null,
-    nominations: [],
-    history: [],
-  });
+  const clubData = await getClubData();
 
   const nomination = clubData.nominations.find((n) => n.id === nominationId);
 
@@ -442,7 +438,7 @@ async function handleSelect(interaction) {
   // Remove from nominations
   clubData.nominations = clubData.nominations.filter((n) => n.id !== nominationId);
 
-  await saveJSON(FILES.BOOKCLUB || "bookclub.json", clubData);
+  await saveClubData(clubData);
 
   await interaction.editReply({
     content:
@@ -484,9 +480,7 @@ async function handleVote(interaction) {
   const nominationId =
     interaction.customId.split("_")[2] || interaction.values?.[0];
 
-  const clubData = await loadJSON(FILES.BOOKCLUB || "bookclub.json", {
-    nominations: [],
-  });
+  const clubData = await getClubData();
 
   const nomination = clubData.nominations.find((n) => n.id === nominationId);
 
@@ -501,13 +495,13 @@ async function handleVote(interaction) {
   // Toggle vote
   if (nomination.votes.includes(interaction.user.id)) {
     nomination.votes = nomination.votes.filter((id) => id !== interaction.user.id);
-    await saveJSON(FILES.BOOKCLUB || "bookclub.json", clubData);
+    await saveClubData(clubData);
     return interaction.editReply({
       content: `✅ Removed your vote for **${nomination.title}**`,
     });
   } else {
     nomination.votes.push(interaction.user.id);
-    await saveJSON(FILES.BOOKCLUB || "bookclub.json", clubData);
+    await saveClubData(clubData);
     return interaction.editReply({
       content: `✅ Voted for **${nomination.title}** by ${nomination.author}!\n\nCurrent votes: ${nomination.votes.length}`,
     });
@@ -550,7 +544,7 @@ async function handleNominateModal(interaction) {
 async function handleAddToTracker(interaction) {
   await interaction.deferReply({ flags: 1 << 6 });
 
-  const clubData = await loadJSON(FILES.BOOKCLUB || "bookclub.json", {});
+  const clubData = await getClubData();
   const pick = clubData.currentPick;
 
   if (!pick) {
@@ -559,39 +553,36 @@ async function handleAddToTracker(interaction) {
     });
   }
 
-  const trackers = await loadJSON(FILES.TRACKERS, {});
   const userId = interaction.user.id;
 
-  if (!trackers[userId]) trackers[userId] = { tracked: [] };
+  // Check if already added in DB
+  const sql = `
+    SELECT 1
+    FROM bc_reading_logs rl
+    JOIN bc_books b ON rl.book_id = b.book_id
+    WHERE rl.user_id = $1 AND LOWER(b.title) = LOWER($2)
+  `;
+  const res = await query(sql, [userId, pick.title]);
 
-  // Check if already added
-  const existing = trackers[userId].tracked.find(
-    (b) =>
-      b.title.toLowerCase() === pick.title.toLowerCase() &&
-      b.author?.toLowerCase() === pick.author?.toLowerCase()
-  );
-
-  if (existing) {
+  if (res.rowCount > 0) {
     return interaction.editReply({
       content: `📚 **${pick.title}** is already in your tracker!`,
     });
   }
 
   // Add to tracker
-  const newTracker = {
-    id: `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
-    title: pick.title,
-    author: pick.author,
-    totalPages: 0,
-    currentPage: 0,
-    status: "reading",
-    startedAt: new Date().toISOString(),
-    updatedAt: new Date().toISOString(),
-    source: "bookclub",
-  };
+  // We need to insert book first if not exists
+  const bookId = `club_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
 
-  trackers[userId].tracked.push(newTracker);
-  await saveJSON(FILES.TRACKERS, trackers);
+  await query(`
+    INSERT INTO bc_books (book_id, title, author)
+    VALUES ($1, $2, $3)
+  `, [bookId, pick.title, pick.author]);
+
+  await query(`
+    INSERT INTO bc_reading_logs (user_id, book_id, status, source)
+    VALUES ($1, $2, 'reading', 'bookclub')
+  `, [userId, bookId]);
 
   await interaction.editReply({
     content: `✅ Added **${pick.title}** to your reading tracker!\n\nUse \`/tracker\` to update your progress.`,
@@ -600,10 +591,6 @@ async function handleAddToTracker(interaction) {
 
 async function handleStartDiscussion(interaction) {
   await interaction.deferReply({ flags: 1 << 6 });
-
-  // This could create a thread or link to a discussion channel
-  // For now, just a placeholder
-
   await interaction.editReply({
     content:
       "💬 **Discussion feature coming soon!**\n\n" +
@@ -621,9 +608,7 @@ export async function handleModalSubmit(interaction) {
     const author = interaction.fields.getTextInputValue("book_author");
     const reason = interaction.fields.getTextInputValue("book_reason") || "";
 
-    const clubData = await loadJSON(FILES.BOOKCLUB || "bookclub.json", {
-      nominations: [],
-    });
+    const clubData = await getClubData();
 
     const nomination = {
       id: `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
@@ -636,7 +621,7 @@ export async function handleModalSubmit(interaction) {
     };
 
     clubData.nominations.push(nomination);
-    await saveJSON(FILES.BOOKCLUB || "bookclub.json", clubData);
+    await saveClubData(clubData);
 
     await interaction.editReply({
       content: `✅ **Nominated:** ${title} by ${author}\n\nUse \`/bookclub picks\` to see all nominations!`,
