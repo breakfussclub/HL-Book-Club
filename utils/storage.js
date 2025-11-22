@@ -187,6 +187,9 @@ async function saveStats(data) {
 
 async function saveGoodreads(data) {
   for (const [userId, link] of Object.entries(data)) {
+    // Ensure user exists first to satisfy FK constraint
+    await query(`INSERT INTO bc_users (user_id) VALUES ($1) ON CONFLICT (user_id) DO NOTHING`, [userId]);
+
     await query(`
       INSERT INTO bc_goodreads_links (user_id, goodreads_user_id, last_sync, sync_results)
       VALUES ($1, $2, $3, $4)
