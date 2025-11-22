@@ -1,13 +1,12 @@
-// utils/goodreadsSync.js — Goodreads RSS Sync Logic (Full Version)
+// utils/goodreadsSync.js — Goodreads RSS Sync Logic (SQL Version)
 // ✅ Validates Goodreads usernames and fetches RSS feeds
 // ✅ Parses RSS feeds for book data
 // ✅ Detects new books since last sync
-// ✅ Integrates with Discord tracker
+// ✅ Integrates with bc_reading_logs and bc_books
 // ✅ Multi-shelf support (read, currently-reading, to-read)
-// ✅ Bulletproof error handling
 
 import Parser from "rss-parser";
-import { loadJSON, saveJSON, FILES } from "./storage.js";
+import { query } from "./db.js";
 import { logger } from "./logger.js";
 import { getConfig } from "../config.js";
 
@@ -145,8 +144,12 @@ function mapShelfToStatus(shelf) {
 
 export async function syncUserGoodreads(discordUserId, client) {
   try {
-    const links = await loadJSON(FILES.GOODREADS_LINKS, {});
-    const link = links[discordUserId];
+    // Get link from DB
+    const linkRes = await query(
+      `SELECT * FROM bc_goodreads_links WHERE user_id = $1`,
+      [discordUserId]
+    );
+    const link = linkRes.rows[0];
 
     if (!link) {
       return {
@@ -157,7 +160,7 @@ export async function syncUserGoodreads(discordUserId, client) {
       };
     }
 
-    const goodreadsUserId = link.goodreadsUserId;
+    const goodreadsUserId = link.goodreads_user_id;
 
     // Fetch all 3 shelves
     const shelves = ["read", "currently-reading", "to-read"];
@@ -192,16 +195,28 @@ export async function syncUserGoodreads(discordUserId, client) {
     });
 
     // Detect new books
-    const previousBooks = link.lastSyncBooks || [];
-    const previousBookIds = new Set(previousBooks.map((b) => b.bookId));
-    const newBooks = allBooks.filter((b) => !previousBookIds.has(b.bookId));
+    // We compare against what's already in bc_reading_logs for this user + goodreads source
+    // Or we can just rely on "ON CONFLICT DO NOTHING" logic in addBooksToTracker
+    // But to report "new books count", we need to know.
+    // Let's fetch existing goodreads_ids for this user.
 
-    // Update link data
+    const existingRes = await query(
+      `SELECT goodreads_id FROM bc_reading_logs 
+       WHERE user_id = $1 AND goodreads_id IS NOT NULL`,
+      [discordUserId]
+    );
+    const existingIds = new Set(existingRes.rows.map(r => r.goodreads_id));
+
+    const newBooks = allBooks.filter((b) => !existingIds.has(b.bookId));
+
+    // Update link data (last_sync timestamp)
     try {
-      link.lastSync = new Date().toISOString();
-      link.lastSyncBooks = allBooks;
-      link.syncResults = shelfResults;
-      await saveJSON(FILES.GOODREADS_LINKS, links);
+      await query(
+        `UPDATE bc_goodreads_links 
+         SET last_sync = NOW(), last_sync_status = $1 
+         WHERE user_id = $2`,
+        [JSON.stringify(shelfResults), discordUserId]
+      );
     } catch (saveError) {
       logger.error("Failed to save link data", {
         discordUserId,
@@ -209,8 +224,8 @@ export async function syncUserGoodreads(discordUserId, client) {
       });
     }
 
-    // Add to tracker (optional)
-    if (newBooks.length > 0 && config.goodreads?.autoAddToTracker) {
+    // Add to tracker
+    if (newBooks.length > 0) {
       try {
         await addBooksToTracker(discordUserId, newBooks, client);
       } catch (trackerError) {
@@ -262,47 +277,44 @@ export async function syncUserGoodreads(discordUserId, client) {
 
 async function addBooksToTracker(discordUserId, books, client) {
   try {
-    const trackers = await loadJSON(FILES.TRACKERS, {});
-
-    if (!trackers[discordUserId]) {
-      trackers[discordUserId] = { tracked: [] };
-    }
-
-    const existingTitles = new Set(
-      trackers[discordUserId].tracked.map((b) => b.title.toLowerCase())
-    );
-
     let addedCount = 0;
 
     for (const book of books) {
-      if (existingTitles.has(book.title.toLowerCase())) {
-        continue;
-      }
-
       const status = mapShelfToStatus(book.shelf);
+      const bookId = `gr_${book.bookId}`; // Use consistent ID generation
 
-      const trackerBook = {
-        title: book.title,
-        author: book.author,
-        totalPages: book.pageCount || 0,
-        currentPage: status === "completed" ? book.pageCount || 0 : 0,
-        status: status,
-        startedAt: book.addedAt || new Date().toISOString(),
-        completedAt: status === "completed" ? book.readAt || new Date().toISOString() : null,
-        source: "goodreads",
-        goodreadsId: book.bookId,
-        thumbnail: book.thumbnail,
-        description: book.description,
-        rating: book.userRating || null,
-      };
+      // 1. Insert into bc_books (if not exists)
+      await query(
+        `INSERT INTO bc_books (book_id, title, author, thumbnail, page_count)
+         VALUES ($1, $2, $3, $4, $5)
+         ON CONFLICT (book_id) DO UPDATE 
+         SET title = EXCLUDED.title, author = EXCLUDED.author, thumbnail = EXCLUDED.thumbnail, page_count = EXCLUDED.page_count`,
+        [bookId, book.title, book.author, book.thumbnail, book.pageCount || 0]
+      );
 
-      trackers[discordUserId].tracked.push(trackerBook);
-      existingTitles.add(book.title.toLowerCase());
+      // 2. Insert into bc_reading_logs
+      // We use ON CONFLICT to update status if it changed (e.g. reading -> completed)
+      await query(
+        `INSERT INTO bc_reading_logs (user_id, book_id, status, current_page, total_pages, started_at, completed_at, source, goodreads_id)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, 'goodreads', $8)
+         ON CONFLICT (user_id, book_id) DO UPDATE
+         SET status = EXCLUDED.status, 
+             current_page = CASE WHEN EXCLUDED.status = 'completed' THEN EXCLUDED.total_pages ELSE bc_reading_logs.current_page END,
+             completed_at = EXCLUDED.completed_at,
+             updated_at = NOW()`,
+        [
+          discordUserId,
+          bookId,
+          status,
+          status === "completed" ? book.pageCount || 0 : 0,
+          book.pageCount || 0,
+          book.addedAt || new Date(),
+          status === "completed" ? book.readAt || new Date() : null,
+          book.bookId
+        ]
+      );
+
       addedCount++;
-    }
-
-    if (addedCount > 0) {
-      await saveJSON(FILES.TRACKERS, trackers);
     }
 
     logger.info("Added Goodreads books to tracker", {
@@ -344,9 +356,8 @@ async function sendSyncNotification(discordUserId, books, client) {
       "to-read": books.filter((b) => b.shelf === "to-read"),
     };
 
-    let message = `📚 <@${discordUserId}> synced ${books.length} new book${
-      books.length === 1 ? "" : "s"
-    } from Goodreads!\n\n`;
+    let message = `📚 <@${discordUserId}> synced ${books.length} new book${books.length === 1 ? "" : "s"
+      } from Goodreads!\n\n`;
 
     for (const [shelf, shelfBooks] of Object.entries(booksByShelves)) {
       if (shelfBooks.length === 0) continue;
@@ -386,8 +397,8 @@ async function sendSyncNotification(discordUserId, books, client) {
 
 export async function syncAllUsers(client) {
   try {
-    const links = await loadJSON(FILES.GOODREADS_LINKS, {});
-    const userIds = Object.keys(links);
+    const res = await query(`SELECT user_id FROM bc_goodreads_links`);
+    const userIds = res.rows.map(r => r.user_id);
 
     if (userIds.length === 0) {
       logger.debug("No linked Goodreads users to sync");

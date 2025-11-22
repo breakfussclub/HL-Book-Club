@@ -1,16 +1,15 @@
-// commands/goodreads.js — Goodreads Integration Commands (Full Version)
-// ✅ Link/unlink Goodreads accounts
+// commands/goodreads.js — Goodreads Integration Commands (SQL Version)
+// ✅ Link/unlink Goodreads accounts using DB
 // ✅ Manual sync trigger
-// ✅ View sync status
+// ✅ View sync status from DB
 // ✅ Multi-shelf support
-// ✅ Improved error messages with actionable guidance
 
 import { SlashCommandBuilder, EmbedBuilder } from "discord.js";
 import {
   validateGoodreadsUser,
   syncUserGoodreads,
 } from "../utils/goodreadsSync.js";
-import { loadJSON, saveJSON, FILES } from "../utils/storage.js";
+import { query } from "../utils/db.js";
 import { logger } from "../utils/logger.js";
 
 const PURPLE = 0x9b59b6;
@@ -66,7 +65,7 @@ async function handleLink(interaction) {
   await interaction.deferReply({ flags: 1 << 6 });
 
   const username = interaction.options.getString("username");
-  
+
   const validation = await validateGoodreadsUser(username);
 
   if (!validation.valid) {
@@ -105,17 +104,23 @@ async function handleLink(interaction) {
     return interaction.editReply({ embeds: [embed] });
   }
 
-  const links = await loadJSON(FILES.GOODREADS_LINKS, {});
-  links[interaction.user.id] = {
-    discordUserId: interaction.user.id,
-    goodreadsUserId: validation.userId,
-    username: validation.username,
-    rssUrl: validation.rssUrl,
-    linkedAt: new Date().toISOString(),
-    lastSync: null,
-    lastSyncBooks: [],
-  };
-  await saveJSON(FILES.GOODREADS_LINKS, links);
+  // Insert into DB
+  // Ensure user exists in bc_users first
+  await query(
+    `INSERT INTO bc_users (user_id, username) VALUES ($1, $2) ON CONFLICT (user_id) DO NOTHING`,
+    [interaction.user.id, interaction.user.username]
+  );
+
+  await query(
+    `INSERT INTO bc_goodreads_links (user_id, goodreads_user_id, username, rss_url)
+     VALUES ($1, $2, $3, $4)
+     ON CONFLICT (user_id) DO UPDATE 
+     SET goodreads_user_id = EXCLUDED.goodreads_user_id, 
+         username = EXCLUDED.username, 
+         rss_url = EXCLUDED.rss_url,
+         linked_at = NOW()`,
+    [interaction.user.id, validation.userId, validation.username, validation.rssUrl]
+  );
 
   const embed = new EmbedBuilder()
     .setColor(SUCCESS_GREEN)
@@ -146,9 +151,12 @@ async function handleLink(interaction) {
 async function handleUnlink(interaction) {
   await interaction.deferReply({ flags: 1 << 6 });
 
-  const links = await loadJSON(FILES.GOODREADS_LINKS, {});
+  const res = await query(
+    `SELECT username FROM bc_goodreads_links WHERE user_id = $1`,
+    [interaction.user.id]
+  );
 
-  if (!links[interaction.user.id]) {
+  if (res.rowCount === 0) {
     const embed = new EmbedBuilder()
       .setColor(INFO_BLUE)
       .setTitle("ℹ️ No Goodreads Account Linked")
@@ -160,9 +168,9 @@ async function handleUnlink(interaction) {
     return interaction.editReply({ embeds: [embed] });
   }
 
-  const username = links[interaction.user.id].username;
-  delete links[interaction.user.id];
-  await saveJSON(FILES.GOODREADS_LINKS, links);
+  const username = res.rows[0].username;
+
+  await query(`DELETE FROM bc_goodreads_links WHERE user_id = $1`, [interaction.user.id]);
 
   const embed = new EmbedBuilder()
     .setColor(SUCCESS_GREEN)
@@ -189,9 +197,13 @@ async function handleUnlink(interaction) {
 async function handleSync(interaction) {
   await interaction.deferReply({ flags: 1 << 6 });
 
-  const links = await loadJSON(FILES.GOODREADS_LINKS, {});
+  // Check if linked
+  const res = await query(
+    `SELECT 1 FROM bc_goodreads_links WHERE user_id = $1`,
+    [interaction.user.id]
+  );
 
-  if (!links[interaction.user.id]) {
+  if (res.rowCount === 0) {
     const embed = new EmbedBuilder()
       .setColor(INFO_BLUE)
       .setTitle("ℹ️ No Goodreads Account Linked")
@@ -268,7 +280,7 @@ async function handleSync(interaction) {
         return `${emoji} **${shelf}**: ${data.count || 0} books`;
       })
       .join("\n");
-    
+
     embed.addFields({ name: "Shelf Breakdown", value: shelfStats });
   }
 
@@ -282,9 +294,12 @@ async function handleSync(interaction) {
 async function handleStatus(interaction) {
   await interaction.deferReply({ flags: 1 << 6 });
 
-  const links = await loadJSON(FILES.GOODREADS_LINKS, {});
+  const res = await query(
+    `SELECT * FROM bc_goodreads_links WHERE user_id = $1`,
+    [interaction.user.id]
+  );
 
-  if (!links[interaction.user.id]) {
+  if (res.rowCount === 0) {
     const embed = new EmbedBuilder()
       .setColor(INFO_BLUE)
       .setTitle("ℹ️ No Goodreads Account Linked")
@@ -297,11 +312,17 @@ async function handleStatus(interaction) {
     return interaction.editReply({ embeds: [embed] });
   }
 
-  const link = links[interaction.user.id];
-  const lastSync = link.lastSync
-    ? new Date(link.lastSync).toLocaleString()
+  const link = res.rows[0];
+  const lastSync = link.last_sync
+    ? new Date(link.last_sync).toLocaleString()
     : "Never";
-  const bookCount = link.lastSyncBooks?.length || 0;
+
+  // Count books synced via goodreads
+  const countRes = await query(
+    `SELECT COUNT(*) FROM bc_reading_logs WHERE user_id = $1 AND source = 'goodreads'`,
+    [interaction.user.id]
+  );
+  const bookCount = parseInt(countRes.rows[0].count);
 
   const embed = new EmbedBuilder()
     .setColor(PURPLE)
@@ -325,15 +346,19 @@ async function handleStatus(interaction) {
     )
     .setFooter({ text: "Use /goodreads unlink to disconnect" });
 
-  if (link.syncResults) {
-    const shelfInfo = Object.entries(link.syncResults)
+  if (link.last_sync_status) {
+    const syncResults = typeof link.last_sync_status === 'string'
+      ? JSON.parse(link.last_sync_status)
+      : link.last_sync_status;
+
+    const shelfInfo = Object.entries(syncResults)
       .map(([shelf, data]) => {
         const emoji = shelf === "read" ? "✅" : shelf === "currently-reading" ? "📖" : "📚";
         const status = data.success ? `${data.count || 0} books` : "⚠️ Error";
         return `${emoji} **${shelf}**: ${status}`;
       })
       .join("\n");
-    
+
     embed.addFields({ name: "Synced Shelves", value: shelfInfo });
   }
 

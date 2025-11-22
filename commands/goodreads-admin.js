@@ -1,13 +1,13 @@
-// commands/goodreads-admin.js — Goodreads Admin Dashboard
-// ✅ View all linked users
+// commands/goodreads-admin.js — Goodreads Admin Dashboard (SQL Version)
+// ✅ View all linked users from DB
 // ✅ Force sync specific users
-// ✅ View sync statistics
+// ✅ View sync statistics from DB
 // ✅ Clear problematic links
 // ✅ Admin-only access control
 
 import { SlashCommandBuilder, EmbedBuilder, PermissionFlagsBits } from "discord.js";
-import { syncUserGoodreads } from "../utils/goodreadsSync.js";
-import { loadJSON, saveJSON, FILES } from "../utils/storage.js";
+import { syncUserGoodreads, syncAllUsers } from "../utils/goodreadsSync.js";
+import { query } from "../utils/db.js";
 import { logger } from "../utils/logger.js";
 
 const PURPLE = 0x9b59b6;
@@ -113,10 +113,10 @@ export async function execute(interaction) {
 async function handleList(interaction) {
   await interaction.deferReply({ flags: 1 << 6 });
 
-  const links = await loadJSON(FILES.GOODREADS_LINKS, {});
-  const userIds = Object.keys(links);
+  const res = await query(`SELECT * FROM bc_goodreads_links`);
+  const links = res.rows;
 
-  if (userIds.length === 0) {
+  if (links.length === 0) {
     const embed = new EmbedBuilder()
       .setColor(PURPLE)
       .setTitle("📚 Linked Goodreads Accounts")
@@ -127,29 +127,34 @@ async function handleList(interaction) {
 
   // Fetch Discord user info
   const userList = await Promise.all(
-    userIds.map(async (userId) => {
+    links.map(async (link) => {
       try {
-        const user = await interaction.client.users.fetch(userId);
-        const link = links[userId];
-        const lastSync = link.lastSync
-          ? new Date(link.lastSync).toLocaleString()
+        const user = await interaction.client.users.fetch(link.user_id);
+        const lastSync = link.last_sync
+          ? new Date(link.last_sync).toLocaleString()
           : "Never";
-        const bookCount = link.lastSyncBooks?.length || 0;
+
+        // Count books synced
+        const countRes = await query(
+          `SELECT COUNT(*) FROM bc_reading_logs WHERE user_id = $1 AND source = 'goodreads'`,
+          [link.user_id]
+        );
+        const bookCount = parseInt(countRes.rows[0].count);
 
         return {
           discord: user.username,
           goodreads: link.username,
           lastSync,
           bookCount,
-          userId,
+          userId: link.user_id,
         };
       } catch (error) {
         return {
-          discord: `Unknown (${userId})`,
-          goodreads: links[userId].username,
+          discord: `Unknown (${link.user_id})`,
+          goodreads: link.username,
           lastSync: "N/A",
           bookCount: 0,
-          userId,
+          userId: link.user_id,
         };
       }
     })
@@ -170,7 +175,7 @@ async function handleList(interaction) {
     .setColor(PURPLE)
     .setTitle("📚 Linked Goodreads Accounts")
     .setDescription(description)
-    .setFooter({ text: `Total: ${userIds.length} user(s)` });
+    .setFooter({ text: `Total: ${links.length} user(s)` });
 
   await interaction.editReply({ embeds: [embed] });
 }
@@ -183,9 +188,13 @@ async function handleSyncUser(interaction) {
   await interaction.deferReply({ flags: 1 << 6 });
 
   const targetUser = interaction.options.getUser("user");
-  const links = await loadJSON(FILES.GOODREADS_LINKS, {});
 
-  if (!links[targetUser.id]) {
+  const res = await query(
+    `SELECT username FROM bc_goodreads_links WHERE user_id = $1`,
+    [targetUser.id]
+  );
+
+  if (res.rowCount === 0) {
     const embed = new EmbedBuilder()
       .setColor(ERROR_RED)
       .setTitle("❌ User Not Linked")
@@ -195,6 +204,8 @@ async function handleSyncUser(interaction) {
 
     return interaction.editReply({ embeds: [embed] });
   }
+
+  const goodreadsUsername = res.rows[0].username;
 
   // Perform sync
   const result = await syncUserGoodreads(targetUser.id, interaction.client);
@@ -206,7 +217,7 @@ async function handleSyncUser(interaction) {
       .setDescription(
         `Failed to sync **${targetUser.username}**\n\n` +
         `**Error:** ${result.error}\n\n` +
-        `**Linked account:** ${links[targetUser.id].username}`
+        `**Linked account:** ${goodreadsUsername}`
       );
 
     return interaction.editReply({ embeds: [embed] });
@@ -220,7 +231,7 @@ async function handleSyncUser(interaction) {
       `Synced **${targetUser.username}**\n\n` +
       `**New Books:** ${result.newBooks}\n` +
       `**Total Books:** ${result.totalBooks}\n` +
-      `**Goodreads Account:** ${links[targetUser.id].username}`
+      `**Goodreads Account:** ${goodreadsUsername}`
     );
 
   if (result.shelves) {
@@ -250,10 +261,10 @@ async function handleSyncUser(interaction) {
 async function handleStats(interaction) {
   await interaction.deferReply({ flags: 1 << 6 });
 
-  const links = await loadJSON(FILES.GOODREADS_LINKS, {});
-  const userIds = Object.keys(links);
+  const res = await query(`SELECT * FROM bc_goodreads_links`);
+  const links = res.rows;
 
-  if (userIds.length === 0) {
+  if (links.length === 0) {
     const embed = new EmbedBuilder()
       .setColor(PURPLE)
       .setTitle("📊 Goodreads Statistics")
@@ -270,26 +281,29 @@ async function handleStats(interaction) {
   const now = Date.now();
   const oneHourAgo = now - 60 * 60 * 1000;
 
-  for (const userId in links) {
-    const link = links[userId];
-    totalBooks += link.lastSyncBooks?.length || 0;
+  // Get total books synced via goodreads
+  const countRes = await query(
+    `SELECT COUNT(*) FROM bc_reading_logs WHERE source = 'goodreads'`
+  );
+  totalBooks = parseInt(countRes.rows[0].count);
 
-    if (link.lastSync) {
+  for (const link of links) {
+    if (link.last_sync) {
       syncedCount++;
-      const syncTime = new Date(link.lastSync).getTime();
+      const syncTime = new Date(link.last_sync).getTime();
       if (syncTime > oneHourAgo) recentSyncs++;
     } else {
       neverSyncedCount++;
     }
   }
 
-  const avgBooksPerUser = userIds.length > 0 ? (totalBooks / userIds.length).toFixed(1) : 0;
+  const avgBooksPerUser = links.length > 0 ? (totalBooks / links.length).toFixed(1) : 0;
 
   const embed = new EmbedBuilder()
     .setColor(PURPLE)
     .setTitle("📊 Goodreads Sync Statistics")
     .addFields(
-      { name: "👥 Total Linked Users", value: String(userIds.length), inline: true },
+      { name: "👥 Total Linked Users", value: String(links.length), inline: true },
       { name: "📚 Total Books Synced", value: String(totalBooks), inline: true },
       { name: "📖 Avg Books/User", value: String(avgBooksPerUser), inline: true },
       { name: "✅ Users With Syncs", value: String(syncedCount), inline: true },
@@ -309,9 +323,13 @@ async function handleUnlinkUser(interaction) {
   await interaction.deferReply({ flags: 1 << 6 });
 
   const targetUser = interaction.options.getUser("user");
-  const links = await loadJSON(FILES.GOODREADS_LINKS, {});
 
-  if (!links[targetUser.id]) {
+  const res = await query(
+    `SELECT username FROM bc_goodreads_links WHERE user_id = $1`,
+    [targetUser.id]
+  );
+
+  if (res.rowCount === 0) {
     const embed = new EmbedBuilder()
       .setColor(ERROR_RED)
       .setTitle("❌ User Not Linked")
@@ -322,9 +340,9 @@ async function handleUnlinkUser(interaction) {
     return interaction.editReply({ embeds: [embed] });
   }
 
-  const goodreadsUsername = links[targetUser.id].username;
-  delete links[targetUser.id];
-  await saveJSON(FILES.GOODREADS_LINKS, links);
+  const goodreadsUsername = res.rows[0].username;
+
+  await query(`DELETE FROM bc_goodreads_links WHERE user_id = $1`, [targetUser.id]);
 
   const embed = new EmbedBuilder()
     .setColor(WARNING_ORANGE)
@@ -352,60 +370,28 @@ async function handleUnlinkUser(interaction) {
 async function handleSyncAll(interaction) {
   await interaction.deferReply({ flags: 1 << 6 });
 
-  const links = await loadJSON(FILES.GOODREADS_LINKS, {});
-  const userIds = Object.keys(links);
-
-  if (userIds.length === 0) {
-    const embed = new EmbedBuilder()
-      .setColor(PURPLE)
-      .setTitle("📚 No Users to Sync")
-      .setDescription("No users have linked their Goodreads accounts.");
-
-    return interaction.editReply({ embeds: [embed] });
-  }
-
   const embed = new EmbedBuilder()
     .setColor(PURPLE)
     .setTitle("🔄 Syncing All Users...")
     .setDescription(
-      `Starting sync for **${userIds.length}** user(s).\n\n` +
+      `Starting batch sync...\n` +
       `This may take a few minutes. Check logs for details.`
     );
 
   await interaction.editReply({ embeds: [embed] });
 
-  // Perform sync with rate limiting
-  let successCount = 0;
-  let failCount = 0;
-  let newBooksTotal = 0;
-
-  for (const userId of userIds) {
-    try {
-      const result = await syncUserGoodreads(userId, interaction.client);
-      if (result.success) {
-        successCount++;
-        newBooksTotal += result.newBooks || 0;
-      } else {
-        failCount++;
-      }
-    } catch (error) {
-      failCount++;
-      logger.error("Sync all error", { userId, error: error.message });
-    }
-
-    // Rate limiting
-    await new Promise((resolve) => setTimeout(resolve, 2000));
-  }
+  // Use the util function which now handles SQL
+  const result = await syncAllUsers(interaction.client);
 
   // Update with results
   const resultEmbed = new EmbedBuilder()
-    .setColor(SUCCESS_GREEN)
-    .setTitle("✅ Batch Sync Complete")
+    .setColor(result.success ? SUCCESS_GREEN : ERROR_RED)
+    .setTitle(result.success ? "✅ Batch Sync Complete" : "❌ Batch Sync Failed")
     .setDescription(
-      `**Total Users:** ${userIds.length}\n` +
-      `**Successful:** ${successCount}\n` +
-      `**Failed:** ${failCount}\n` +
-      `**New Books Added:** ${newBooksTotal}`
+      `**Total Users:** ${result.total}\n` +
+      `**Successful:** ${result.successCount}\n` +
+      `**Failed:** ${result.failedCount}\n` +
+      (result.error ? `**Error:** ${result.error}` : "")
     )
     .setFooter({ text: "Check /goodreads-admin stats for updated statistics" });
 
@@ -413,10 +399,7 @@ async function handleSyncAll(interaction) {
 
   logger.info("Admin batch sync completed", {
     admin: interaction.user.id,
-    total: userIds.length,
-    success: successCount,
-    failed: failCount,
-    newBooks: newBooksTotal,
+    result
   });
 }
 
