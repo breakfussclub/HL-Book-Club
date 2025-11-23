@@ -178,7 +178,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
 client.once(Events.ClientReady, async () => {
   logger.info(`✅ Logged in as ${client.user.tag}`);
   client.user.setActivity(config.discord.activity || "HL Book Club 📚");
-  await ensureAllFiles();
 
   // Initialize DB
   await initDB();
