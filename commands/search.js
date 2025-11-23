@@ -1,7 +1,7 @@
 // commands/search.js — HL Book Club Edition (Force Public Output)
 // ✅ Forces /search to display publicly regardless of global defaults
-// ✅ Retains ❤️ Favorite logic and Google Books integration
-// ✅ Keeps debug logging + safety guards
+// ✅ Retains ❤️ Favorite logic (PostgreSQL)
+// ✅ Google Books integration
 // ✅ FIXED: Amazon links now use proper ISBN filtering
 
 import {
@@ -14,7 +14,7 @@ import {
 
 import { hybridSearchMany } from "../utils/search.js";
 import { EMBED_THEME } from "../utils/embedThemes.js";
-import { loadJSON, saveJSON, FILES } from "../utils/storage.js";
+import { query } from "../utils/db.js";
 
 const DEBUG = process.env.DEBUG === "true";
 
@@ -32,28 +32,28 @@ export const definitions = [
 
 export async function execute(interaction) {
   try {
-    const query = interaction.options.getString("query", true);
+    const searchQuery = interaction.options.getString("query", true);
 
     // ✅ Defer quietly (private placeholder) so no errors
     if (!interaction.deferred && !interaction.replied) {
       await interaction.deferReply({ ephemeral: true });
     }
 
-    const results = await hybridSearchMany(query, 1);
+    const results = await hybridSearchMany(searchQuery, 1);
 
     if (!results?.length) {
       return interaction.followUp({
-        content: `No results found for **${query}**.`,
+        content: `No results found for **${searchQuery}**.`,
       });
     }
 
     const book = results[0];
-    
+
     // ✅ FIXED: Extract actual ISBN (not EAN), prefer ISBN_10
     const isbn10 = book.industryIdentifiers?.find(id => id.type === 'ISBN_10')?.identifier;
     const isbn13 = book.industryIdentifiers?.find(id => id.type === 'ISBN_13')?.identifier;
     const isbn = isbn10 || isbn13;
-    
+
     // Build Amazon URL with proper format
     const amazonUrl = isbn
       ? `https://www.amazon.com/dp/${isbn.replace(/-/g, '')}`
@@ -75,7 +75,7 @@ export async function execute(interaction) {
       .setDescription(
         book.description
           ? book.description.slice(0, 400) +
-            (book.description.length > 400 ? "..." : "")
+          (book.description.length > 400 ? "..." : "")
           : "No summary available."
       )
       .addFields(
@@ -96,9 +96,8 @@ export async function execute(interaction) {
         }
       )
       .setFooter({
-        text: `${book.source || "Google Books"}${
-          book.publishedDate ? ` • Published ${book.publishedDate}` : ""
-        } • HL Book Club • Higher-er Learning`,
+        text: `${book.source || "Google Books"}${book.publishedDate ? ` • Published ${book.publishedDate}` : ""
+          } • HL Book Club • Higher-er Learning`,
       });
 
     if (book.thumbnail) embed.setThumbnail(book.thumbnail);
@@ -109,7 +108,7 @@ export async function execute(interaction) {
         .setStyle(ButtonStyle.Link)
         .setURL(
           book.previewLink ||
-            `https://www.google.com/search?q=${encodeURIComponent(book.title)}`
+          `https://www.google.com/search?q=${encodeURIComponent(book.title)}`
         ),
       new ButtonBuilder()
         .setLabel("View on Amazon")
@@ -134,7 +133,7 @@ export async function execute(interaction) {
     console.error("[search.execute]", err);
     try {
       await interaction.followUp({ content: "⚠️ Something went wrong." });
-    } catch {}
+    } catch { }
   }
 }
 
@@ -150,28 +149,32 @@ export async function handleComponent(i) {
           flags: 1 << 6,
         });
 
-      const favorites = await loadJSON(FILES.FAVORITES);
-      favorites[i.user.id] = favorites[i.user.id] || [];
-      const list = favorites[i.user.id];
+      const userId = i.user.id;
 
-      if (list.some((b) => b.id === book.id)) {
+      // Ensure user exists
+      await query(`INSERT INTO bc_users (user_id, username) VALUES ($1, $2) ON CONFLICT (user_id) DO NOTHING`, [userId, i.user.username]);
+
+      // Check if already favorited
+      const check = await query(`SELECT 1 FROM bc_favorites WHERE user_id = $1 AND book_id = $2`, [userId, book.id]);
+
+      if (check.rowCount > 0) {
         return i.reply({
           content: `❤️ **${book.title || "Untitled"}** is already in your favorites.`,
           flags: 1 << 6,
         });
       }
 
-      list.push({
-        id: book.id,
-        userId: i.user.id,
-        title: book.title || "Untitled",
-        authors: book.authors || [],
-        thumbnail: book.thumbnail || null,
-        previewLink: book.previewLink || null,
-        addedAt: new Date().toISOString(),
-      });
-
-      await saveJSON(FILES.FAVORITES, favorites);
+      // Add to favorites
+      await query(`
+        INSERT INTO bc_favorites (user_id, book_id, title, author, thumbnail)
+        VALUES ($1, $2, $3, $4, $5)
+      `, [
+        userId,
+        book.id,
+        book.title || "Untitled",
+        book.authors?.[0] || "Unknown",
+        book.thumbnail || null
+      ]);
 
       await i.reply({
         content: `✅ Added **${book.title || "Untitled"}** to your favorites!`,
@@ -185,6 +188,6 @@ export async function handleComponent(i) {
     console.error("[search.handleComponent]", err);
     try {
       await i.reply({ content: "⚠️ Couldn't add to favorites.", flags: 1 << 6 });
-    } catch {}
+    } catch { }
   }
 }

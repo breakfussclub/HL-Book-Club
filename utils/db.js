@@ -82,7 +82,34 @@ const SCHEMA = `
     timestamp TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
   );
   CREATE INDEX IF NOT EXISTS idx_bc_reading_history_user_book ON bc_reading_history(user_id, book_id);
-`;
+
+  CREATE TABLE IF NOT EXISTS bc_quotes (
+    id SERIAL PRIMARY KEY,
+    user_id VARCHAR(255) REFERENCES bc_users(user_id),
+    quote TEXT NOT NULL,
+    book_title VARCHAR(255),
+    notes TEXT,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+  );
+  CREATE INDEX IF NOT EXISTS idx_bc_quotes_user_id ON bc_quotes(user_id);
+
+  CREATE TABLE IF NOT EXISTS bc_reading_goals (
+    user_id VARCHAR(255) REFERENCES bc_users(user_id),
+    year INTEGER NOT NULL,
+    book_count INTEGER NOT NULL,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (user_id, year)
+  );
+
+  CREATE TABLE IF NOT EXISTS bc_favorites (
+    user_id VARCHAR(255) REFERENCES bc_users(user_id),
+    book_id VARCHAR(255),
+    title TEXT,
+    author TEXT,
+    thumbnail TEXT,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (user_id, book_id)
+  );
 
 export async function initDB() {
   const client = await pool.connect();
@@ -94,7 +121,7 @@ export async function initDB() {
     await client.query(`
       ALTER TABLE bc_goodreads_links 
       ADD COLUMN IF NOT EXISTS last_sync_status JSONB;
-    `);
+`);
 
     logger.info('Database schema initialized successfully.');
   } catch (err) {

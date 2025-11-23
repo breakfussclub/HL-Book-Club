@@ -1,6 +1,6 @@
 // commands/quote.js — Consolidated Quote Command
 // ✅ Subcommands: /quote add, /quote list
-// ✅ Uses legacy JSON storage (for now) but structured for future SQL migration
+// ✅ Uses PostgreSQL (bc_quotes table)
 // ✅ Merges functionality of quote.js and my-quotes.js
 
 import {
@@ -11,7 +11,7 @@ import {
   ActionRowBuilder,
   EmbedBuilder,
 } from "discord.js";
-import { loadJSON, saveJSON, FILES } from "../utils/storage.js";
+import { query } from "../utils/db.js";
 import { EMBED_THEME } from "../utils/embedThemes.js";
 
 const DEBUG = process.env.DEBUG === "true";
@@ -86,8 +86,16 @@ async function handleList(interaction) {
       await interaction.deferReply();
     }
 
-    const quotes = await loadJSON(FILES.QUOTES);
-    const userQuotes = quotes[interaction.user.id] || [];
+    const userId = interaction.user.id;
+
+    // Ensure user exists (though usually they should if they are using the bot)
+    await query(`INSERT INTO bc_users (user_id, username) VALUES ($1, $2) ON CONFLICT (user_id) DO NOTHING`, [userId, interaction.user.username]);
+
+    const res = await query(
+      `SELECT * FROM bc_quotes WHERE user_id = $1 ORDER BY created_at DESC LIMIT 10`,
+      [userId]
+    );
+    const userQuotes = res.rows;
 
     if (!userQuotes.length) {
       return await interaction.editReply({
@@ -95,15 +103,10 @@ async function handleList(interaction) {
       });
     }
 
-    // Sort newest → oldest
-    const sorted = [...userQuotes].sort(
-      (a, b) => new Date(b.createdAt || b.addedAt) - new Date(a.createdAt || a.addedAt)
-    );
-
-    const lines = sorted.slice(0, 10).map((q) => {
-      const text = q.text || q.quote || "(no text)";
-      const book = q.book || "—";
-      const created = q.createdAt || q.addedAt ? new Date(q.createdAt || q.addedAt) : new Date();
+    const lines = userQuotes.map((q) => {
+      const text = q.quote || "(no text)";
+      const book = q.book_title || "—";
+      const created = new Date(q.created_at);
       const time = `<t:${Math.floor(created.getTime() / 1000)}:R>`;
       const notes = q.notes ? `🗒️ *${q.notes.trim()}*\n` : "";
 
@@ -119,7 +122,7 @@ async function handleList(interaction) {
       .setTitle("🪶 My Saved Quotes")
       .setDescription(lines.join("\n\n"))
       .setFooter({
-        text: `${userQuotes.length} total quotes • ${EMBED_THEME.footer}`,
+        text: `${userQuotes.length} recent quotes • ${EMBED_THEME.footer}`,
       });
 
     await interaction.editReply({ embeds: [embed] });
@@ -152,15 +155,16 @@ export async function handleModalSubmit(interaction) {
       return true;
     }
 
-    const quotes = await loadJSON(FILES.QUOTES);
-    quotes[interaction.user.id] = quotes[interaction.user.id] || [];
-    quotes[interaction.user.id].unshift({
-      quote,
-      book,
-      notes,
-      addedAt: new Date().toISOString(),
-    });
-    await saveJSON(FILES.QUOTES, quotes);
+    const userId = interaction.user.id;
+
+    // Ensure user exists
+    await query(`INSERT INTO bc_users (user_id, username) VALUES ($1, $2) ON CONFLICT (user_id) DO NOTHING`, [userId, interaction.user.username]);
+
+    // Insert quote
+    await query(
+      `INSERT INTO bc_quotes (user_id, quote, book_title, notes) VALUES ($1, $2, $3, $4)`,
+      [userId, quote, book, notes]
+    );
 
     const embed = new EmbedBuilder()
       .setColor(0x8b5cf6)

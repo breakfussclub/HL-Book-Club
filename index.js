@@ -12,11 +12,11 @@ import {
   Routes,
 } from "discord.js";
 import { getConfig } from "./config.js";
-import { ensureAllFiles } from "./utils/storage.js";
+
 import { setupGlobalErrorHandlers, safeExecute, safeHandleComponent } from "./utils/errorHandler.js";
 import { isEphemeral } from "./utils/commandVisibility.js";
 import { logger } from "./utils/logger.js";
-import { startBackupScheduler } from "./utils/backup.js";
+
 import { startGoodreadsScheduler } from "./utils/goodreadsScheduler.js";
 
 const config = getConfig();
@@ -151,17 +151,17 @@ client.on(Events.InteractionCreate, async (interaction) => {
     }
   } catch (err) {
     logger.error("Interaction error", { error: err.message });
-    
+
     // FIXED: Proper error response handling
     try {
       if (interaction.deferred) {
-        await interaction.editReply({ 
-          content: "❌ An error occurred while processing your command." 
+        await interaction.editReply({
+          content: "❌ An error occurred while processing your command."
         });
       } else if (!interaction.replied) {
-        await interaction.reply({ 
+        await interaction.reply({
           content: "❌ An error occurred while processing your command.",
-          flags: 1 << 6 
+          flags: 1 << 6
         });
       }
     } catch (replyError) {
@@ -179,7 +179,10 @@ client.once(Events.ClientReady, async () => {
   logger.info(`✅ Logged in as ${client.user.tag}`);
   client.user.setActivity(config.discord.activity || "HL Book Club 📚");
   await ensureAllFiles();
-  startBackupScheduler();
+
+  // Initialize DB
+  await initDB();
+
   startGoodreadsScheduler(client);
   logger.info("🚀 Bot fully initialized and ready");
 });

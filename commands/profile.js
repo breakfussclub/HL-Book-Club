@@ -1,11 +1,10 @@
 // commands/profile.js — Optimized with SQL
 // 📘 /profile — Displays a member's reading stats
 // ✅ Uses SQL for book stats (performance)
-// ✅ Uses JSON for quotes/goals (legacy compatibility)
+// ✅ Uses SQL for quotes and goals
 
 import { SlashCommandBuilder } from "discord.js";
 import { query } from "../utils/db.js";
-import { loadJSON, FILES } from "../utils/storage.js";
 import { buildProfileEmbed } from "../views/profile.js";
 import { logger } from "../utils/logger.js";
 
@@ -24,7 +23,7 @@ async function getUserProfileData(userId) {
 
   // 2. Get Recent Books from DB
   const recentSql = `
-    SELECT b.title, b.author, b.preview_link, b.thumbnail
+    SELECT b.title, b.author, b.thumbnail
     FROM bc_reading_logs rl
     JOIN bc_books b ON rl.book_id = b.book_id
     WHERE rl.user_id = $1
@@ -33,15 +32,17 @@ async function getUserProfileData(userId) {
   `;
   const recentRes = await query(recentSql, [userId]);
 
-  // 3. Get Legacy Data (Quotes, Favorites, Goals)
-  // TODO: Migrate these to DB
-  const quotes = await loadJSON(FILES.QUOTES, {});
-  const favorites = await loadJSON(FILES.FAVORITES, {});
-  const goals = await loadJSON(FILES.READING_GOALS, {});
+  // 3. Get Quotes from DB
+  const quotesRes = await query(`SELECT quote FROM bc_quotes WHERE user_id = $1 ORDER BY created_at DESC`, [userId]);
+  const userQuotes = quotesRes.rows;
 
-  const userQuotes = quotes[userId] || [];
-  const userFavorites = favorites[userId] || [];
-  const userGoal = goals[userId] || null;
+  // 4. Get Goals from DB
+  const goalsRes = await query(`SELECT book_count, year FROM bc_reading_goals WHERE user_id = $1 ORDER BY year DESC LIMIT 1`, [userId]);
+  const userGoal = goalsRes.rows[0] ? { bookCount: goalsRes.rows[0].book_count, year: goalsRes.rows[0].year } : null;
+
+  // 5. Get Favorites from DB
+  const favRes = await query(`SELECT COUNT(*) FROM bc_favorites WHERE user_id = $1`, [userId]);
+  const favoritesCount = parseInt(favRes.rows[0].count);
 
   return {
     booksTracked: parseInt(dbStats.books_tracked || 0),
@@ -50,11 +51,11 @@ async function getUserProfileData(userId) {
     recentBooks: recentRes.rows.map(b => ({
       title: b.title,
       author: b.author,
-      previewLink: b.preview_link || b.thumbnail
+      previewLink: b.thumbnail // Using thumbnail as link if preview_link missing, or just null
     })),
     quotesSaved: userQuotes.length,
-    favorites: userFavorites.length,
-    favoriteQuote: userQuotes.length > 0 ? userQuotes[userQuotes.length - 1].text : null,
+    favorites: favoritesCount,
+    favoriteQuote: userQuotes.length > 0 ? userQuotes[0].quote : null,
     goal: userGoal
   };
 }
@@ -73,6 +74,9 @@ export async function execute(interaction) {
     const target = interaction.options.getUser("user") || interaction.user;
     if (!interaction.deferred && !interaction.replied)
       await interaction.deferReply({ ephemeral: false });
+
+    // Ensure user exists in DB to avoid errors if they are new
+    await query(`INSERT INTO bc_users (user_id, username) VALUES ($1, $2) ON CONFLICT (user_id) DO NOTHING`, [target.id, target.username]);
 
     const stats = await getUserProfileData(target.id);
     const embed = buildProfileEmbed(interaction, target, stats);

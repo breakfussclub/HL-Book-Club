@@ -1,11 +1,11 @@
 // commands/reading-goal.js — Reading Goals System
-// ✅ Set annual reading goals
+// ✅ Set annual reading goals (PostgreSQL)
 // ✅ Track progress with visual bar
 // ✅ Calculate pace and milestones
 // ✅ Year-end summaries
 
 import { SlashCommandBuilder, EmbedBuilder } from "discord.js";
-import { loadJSON, saveJSON, FILES } from "../utils/storage.js";
+import { query } from "../utils/db.js";
 import { logger } from "../utils/logger.js";
 
 const PURPLE = 0x9b59b6;
@@ -99,18 +99,22 @@ async function handleSet(interaction) {
     return interaction.editReply({ embeds: [embed] });
   }
 
+  const userId = interaction.user.id;
+
+  // Ensure user exists
+  await query(`INSERT INTO bc_users (user_id, username) VALUES ($1, $2) ON CONFLICT (user_id) DO NOTHING`, [userId, interaction.user.username]);
+
   // Save goal
-  const goals = await loadJSON(FILES.READING_GOALS, {});
-  goals[interaction.user.id] = {
-    userId: interaction.user.id,
-    bookCount,
-    year,
-    createdAt: new Date().toISOString(),
-  };
-  await saveJSON(FILES.READING_GOALS, goals);
+  await query(`
+    INSERT INTO bc_reading_goals (user_id, year, book_count)
+    VALUES ($1, $2, $3)
+    ON CONFLICT (user_id, year) DO UPDATE SET
+      book_count = EXCLUDED.book_count,
+      created_at = NOW()
+  `, [userId, year, bookCount]);
 
   // Calculate current progress
-  const progress = await calculateProgress(interaction.user.id, year);
+  const progress = await calculateProgress(userId, year);
 
   const embed = new EmbedBuilder()
     .setColor(SUCCESS_GREEN)
@@ -125,7 +129,7 @@ async function handleSet(interaction) {
   await interaction.editReply({ embeds: [embed] });
 
   logger.info("Reading goal set", {
-    userId: interaction.user.id,
+    userId,
     bookCount,
     year,
   });
@@ -138,8 +142,21 @@ async function handleSet(interaction) {
 async function handleProgress(interaction) {
   await interaction.deferReply({ flags: 1 << 6 });
 
-  const goals = await loadJSON(FILES.READING_GOALS, {});
-  const goal = goals[interaction.user.id];
+  const userId = interaction.user.id;
+  const currentYear = new Date().getFullYear();
+
+  // Default to current year if no specific year requested (future enhancement: add year option to progress)
+  // For now, we check if they have a goal for the current year, or maybe the most recent one?
+  // Let's stick to current year or the most recent one they set.
+
+  const res = await query(`
+    SELECT * FROM bc_reading_goals 
+    WHERE user_id = $1 
+    ORDER BY year DESC 
+    LIMIT 1
+  `, [userId]);
+
+  const goal = res.rows[0];
 
   if (!goal) {
     const embed = new EmbedBuilder()
@@ -154,8 +171,8 @@ async function handleProgress(interaction) {
     return interaction.editReply({ embeds: [embed] });
   }
 
-  const progress = await calculateProgress(interaction.user.id, goal.year);
-  const isCurrentYear = goal.year === new Date().getFullYear();
+  const progress = await calculateProgress(userId, goal.year);
+  const isCurrentYear = goal.year === currentYear;
 
   // Progress bar
   const progressBar = createProgressBar(progress.percentage, 20);
@@ -169,7 +186,7 @@ async function handleProgress(interaction) {
     .setColor(color)
     .setTitle(`📖 ${goal.year} Reading Goal`)
     .setDescription(
-      `**Goal:** ${goal.bookCount} book${goal.bookCount === 1 ? "" : "s"}\n` +
+      `**Goal:** ${goal.book_count} book${goal.book_count === 1 ? "" : "s"}\n` +
       `**Completed:** ${progress.completed} book${progress.completed === 1 ? "" : "s"}\n` +
       `**Remaining:** ${progress.remaining} book${progress.remaining === 1 ? "" : "s"}\n\n` +
       `${progressBar} **${progress.percentage}%**\n\n` +
@@ -201,7 +218,7 @@ async function handleProgress(interaction) {
   }
 
   embed.setFooter({
-    text: `Goal set on ${new Date(goal.createdAt).toLocaleDateString()}`,
+    text: `Goal set on ${new Date(goal.created_at).toLocaleDateString()}`,
   });
 
   await interaction.editReply({ embeds: [embed] });
@@ -214,9 +231,19 @@ async function handleProgress(interaction) {
 async function handleRemove(interaction) {
   await interaction.deferReply({ flags: 1 << 6 });
 
-  const goals = await loadJSON(FILES.READING_GOALS, {});
+  const userId = interaction.user.id;
 
-  if (!goals[interaction.user.id]) {
+  // Get current goal first to show what was removed
+  const res = await query(`
+    SELECT * FROM bc_reading_goals 
+    WHERE user_id = $1 
+    ORDER BY year DESC 
+    LIMIT 1
+  `, [userId]);
+
+  const oldGoal = res.rows[0];
+
+  if (!oldGoal) {
     const embed = new EmbedBuilder()
       .setColor(INFO_BLUE)
       .setTitle("ℹ️ No Goal to Remove")
@@ -225,23 +252,21 @@ async function handleRemove(interaction) {
     return interaction.editReply({ embeds: [embed] });
   }
 
-  const oldGoal = goals[interaction.user.id];
-  delete goals[interaction.user.id];
-  await saveJSON(FILES.READING_GOALS, goals);
+  await query(`DELETE FROM bc_reading_goals WHERE user_id = $1 AND year = $2`, [userId, oldGoal.year]);
 
   const embed = new EmbedBuilder()
     .setColor(SUCCESS_GREEN)
     .setTitle("✅ Reading Goal Removed")
     .setDescription(
-      `Your ${oldGoal.year} goal of ${oldGoal.bookCount} books has been removed.\n\n` +
+      `Your ${oldGoal.year} goal of ${oldGoal.book_count} books has been removed.\n\n` +
       "You can set a new goal anytime with `/reading-goal set`."
     );
 
   await interaction.editReply({ embeds: [embed] });
 
   logger.info("Reading goal removed", {
-    userId: interaction.user.id,
-    oldGoal,
+    userId,
+    year: oldGoal.year,
   });
 }
 
@@ -250,18 +275,24 @@ async function handleRemove(interaction) {
 // ─────────────────────────────────────────────────────────────
 
 async function calculateProgress(userId, year) {
-  const trackers = await loadJSON(FILES.TRACKERS, {});
-  const userTrackers = trackers[userId]?.tracked || [];
+  // Count completed books in the target year from DB
+  const res = await query(`
+    SELECT COUNT(*) 
+    FROM bc_reading_logs 
+    WHERE user_id = $1 
+      AND status = 'completed' 
+      AND EXTRACT(YEAR FROM completed_at) = $2
+  `, [userId, year]);
 
-  // Count completed books in the target year
-  const completed = userTrackers.filter((book) => {
-    if (book.status !== "completed" || !book.completedAt) return false;
-    const completedYear = new Date(book.completedAt).getFullYear();
-    return completedYear === year;
-  }).length;
+  const completed = parseInt(res.rows[0].count);
 
-  const goals = await loadJSON(FILES.READING_GOALS, {});
-  const goal = goals[userId];
+  const goalRes = await query(`
+    SELECT book_count 
+    FROM bc_reading_goals 
+    WHERE user_id = $1 AND year = $2
+  `, [userId, year]);
+
+  const goal = goalRes.rows[0];
 
   if (!goal) {
     return {
@@ -274,30 +305,29 @@ async function calculateProgress(userId, year) {
     };
   }
 
-  const remaining = Math.max(0, goal.bookCount - completed);
-  const percentage = Math.min(100, Math.round((completed / goal.bookCount) * 100));
+  const bookCount = goal.book_count;
+  const remaining = Math.max(0, bookCount - completed);
+  const percentage = Math.min(100, Math.round((completed / bookCount) * 100));
 
   // Calculate if on pace
   const today = new Date();
   const startOfYear = new Date(year, 0, 1);
   const endOfYear = new Date(year, 11, 31);
   const yearProgress = (today - startOfYear) / (endOfYear - startOfYear);
-  const expectedBooks = Math.floor(goal.bookCount * yearProgress);
+  const expectedBooks = Math.floor(bookCount * yearProgress);
   const onPace = completed >= expectedBooks;
 
   // Generate pace message
   let paceMessage = "";
-  if (completed >= goal.bookCount) {
+  if (completed >= bookCount) {
     paceMessage = `🎉 **Goal reached!** You've completed your ${year} reading goal!`;
   } else if (year === today.getFullYear()) {
     if (onPace) {
-      paceMessage = `✅ **On pace!** You're ${completed - expectedBooks} book${
-        completed - expectedBooks === 1 ? "" : "s"
-      } ahead of schedule.`;
+      paceMessage = `✅ **On pace!** You're ${completed - expectedBooks} book${completed - expectedBooks === 1 ? "" : "s"
+        } ahead of schedule.`;
     } else {
-      paceMessage = `⚠️ **Behind pace.** You need ${expectedBooks - completed} more book${
-        expectedBooks - completed === 1 ? "" : "s"
-      } to catch up.`;
+      paceMessage = `⚠️ **Behind pace.** You need ${expectedBooks - completed} more book${expectedBooks - completed === 1 ? "" : "s"
+        } to catch up.`;
     }
   } else if (year > today.getFullYear()) {
     paceMessage = `📅 Goal starts in ${year}`;
@@ -337,11 +367,18 @@ function createProgressBar(percentage, length = 20) {
 // ─────────────────────────────────────────────────────────────
 
 export async function getGoalProgress(userId) {
-  const goals = await loadJSON(FILES.READING_GOALS, {});
-  const goal = goals[userId];
-  
+  // Get most recent goal
+  const res = await query(`
+    SELECT year FROM bc_reading_goals 
+    WHERE user_id = $1 
+    ORDER BY year DESC 
+    LIMIT 1
+  `, [userId]);
+
+  const goal = res.rows[0];
+
   if (!goal) return null;
-  
+
   return calculateProgress(userId, goal.year);
 }
 
