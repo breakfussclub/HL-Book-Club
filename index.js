@@ -12,6 +12,7 @@ import {
   Routes,
 } from "discord.js";
 import { getConfig } from "./config.js";
+import { initDB } from "./utils/db.js";
 
 import { setupGlobalErrorHandlers, safeExecute, safeHandleComponent } from "./utils/errorHandler.js";
 import { isEphemeral } from "./utils/commandVisibility.js";
