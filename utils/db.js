@@ -110,6 +110,7 @@ const SCHEMA = `
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (user_id, book_id)
   );
+`;
 
 export async function initDB() {
   const client = await pool.connect();
