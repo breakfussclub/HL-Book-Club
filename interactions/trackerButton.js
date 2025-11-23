@@ -1,12 +1,12 @@
 // interactions/trackerButton.js
 // Handles "Add to My Tracker" button clicks
 // ✅ Auto-adds book to tracker without modal
+// ✅ Uses PostgreSQL
 
-import { loadJSON, saveJSON, FILES } from "../utils/storage.js";
+import { query } from "../utils/db.js";
 import { EmbedBuilder } from "discord.js";
 
 const GREEN = 0x16a34a;
-const YELLOW = 0xfacc15;
 const DEBUG = process.env.DEBUG === "true";
 
 export async function handleTrackerButton(interaction) {
@@ -21,55 +21,66 @@ export async function handleTrackerButton(interaction) {
     }
 
     // Extract minimal info from the embed
-    const book = {
-      id: embed.url || embed.title,
-      title: embed.title || "Untitled",
-      authors: [],
-      pageCount: 0,
-      status: "current",
-      progress: 0,
-      addedAt: new Date().toISOString(),
-    };
+    // Use URL (Google Books ID usually) or Title as ID
+    // If URL is a full URL, we might want to hash it or just use it if it fits.
+    // bc_books.book_id is VARCHAR(255).
+    let bookId = embed.url || embed.title;
+    // Sanitize ID if it's a URL to be shorter if needed, but 255 chars is usually enough for Google Books URLs.
+    // Ideally we extract the ID from the URL if possible, but for now let's use what we have.
+
+    const title = embed.title || "Untitled";
+    let authors = [];
 
     // Try to parse author field if present
     const authorsField = embed.fields?.find((f) => f.name === "Authors");
     if (authorsField && authorsField.value)
-      book.authors = authorsField.value.split(",").map((s) => s.trim());
+      authors = authorsField.value.split(",").map((s) => s.trim());
 
-    // Load trackers file
-    const trackers = await loadJSON(FILES.TRACKERS);
-    if (!trackers[interaction.user.id])
-      trackers[interaction.user.id] = { tracked: [] };
+    const authorStr = authors.join(", ");
+    const pageCount = 0; // Default since we might not have it in embed easily or parsed
 
-    const userTracker = trackers[interaction.user.id].tracked;
+    const userId = interaction.user.id;
 
-    // Check for duplicates
-    const exists = userTracker.some(
-      (b) => b.title.toLowerCase() === book.title.toLowerCase()
-    );
+    // Ensure user exists
+    await query(`INSERT INTO bc_users (user_id, username) VALUES ($1, $2) ON CONFLICT (user_id) DO NOTHING`, [userId, interaction.user.username]);
 
-    if (exists) {
+    // Check if already tracked
+    const check = await query(`SELECT 1 FROM bc_reading_logs WHERE user_id = $1 AND book_id = $2`, [userId, bookId]);
+
+    if (check.rowCount > 0) {
       await interaction.reply({
-        content: `⚠️ *${book.title}* is already in your tracker.`,
+        content: `⚠️ *${title}* is already in your tracker.`,
         ephemeral: true,
       });
       return;
     }
 
-    // Add and save
-    userTracker.push(book);
-    await saveJSON(FILES.TRACKERS, trackers);
+    // Ensure book exists in bc_books
+    await query(`
+      INSERT INTO bc_books (book_id, title, author, page_count, thumbnail)
+      VALUES ($1, $2, $3, $4, $5)
+      ON CONFLICT (book_id) DO UPDATE SET
+        title = EXCLUDED.title,
+        author = EXCLUDED.author,
+        thumbnail = EXCLUDED.thumbnail
+    `, [bookId, title, authorStr, pageCount, embed.thumbnail?.url || null]);
+
+    // Add to reading logs
+    await query(`
+      INSERT INTO bc_reading_logs (user_id, book_id, status, current_page, total_pages, started_at, updated_at)
+      VALUES ($1, $2, 'reading', 0, $3, NOW(), NOW())
+    `, [userId, bookId, pageCount]);
 
     const confirm = new EmbedBuilder()
       .setTitle(`✅ Added to Your Tracker`)
-      .setDescription(`**${book.title}**`)
+      .setDescription(`**${title}**`)
       .setColor(GREEN);
 
     await interaction.reply({ embeds: [confirm], ephemeral: true });
 
     if (DEBUG)
       console.log(
-        `[trackerButton] ${interaction.user.username} added "${book.title}"`
+        `[trackerButton] ${interaction.user.username} added "${title}"`
       );
   } catch (err) {
     console.error("[trackerButton]", err);
