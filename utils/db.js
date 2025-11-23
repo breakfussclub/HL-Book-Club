@@ -33,6 +33,7 @@ const SCHEMA = `
     author TEXT,
     description TEXT,
     thumbnail TEXT,
+    preview_link TEXT,
     page_count INTEGER,
     published_date VARCHAR(50),
     average_rating NUMERIC(3, 2),
@@ -118,11 +119,14 @@ export async function initDB() {
     logger.info('Initializing database schema...');
     await client.query(SCHEMA);
 
-    // Auto-migration for missing column
+    // Auto-migration for missing columns
     await client.query(`
       ALTER TABLE bc_goodreads_links 
       ADD COLUMN IF NOT EXISTS last_sync_status JSONB;
-`);
+
+      ALTER TABLE bc_books
+      ADD COLUMN IF NOT EXISTS preview_link TEXT;
+    `);
 
     logger.info('Database schema initialized successfully.');
   } catch (err) {
