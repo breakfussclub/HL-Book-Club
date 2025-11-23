@@ -60,6 +60,7 @@ const SCHEMA = `
     user_id VARCHAR(255) PRIMARY KEY REFERENCES bc_users(user_id),
     goodreads_user_id VARCHAR(255),
     last_sync TIMESTAMP WITH TIME ZONE,
+    last_sync_status JSONB,
     sync_results JSONB,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
   );
@@ -88,6 +89,13 @@ export async function initDB() {
   try {
     logger.info('Initializing database schema...');
     await client.query(SCHEMA);
+
+    // Auto-migration for missing column
+    await client.query(`
+      ALTER TABLE bc_goodreads_links 
+      ADD COLUMN IF NOT EXISTS last_sync_status JSONB;
+    `);
+
     logger.info('Database schema initialized successfully.');
   } catch (err) {
     logger.error('Failed to initialize database schema', err);

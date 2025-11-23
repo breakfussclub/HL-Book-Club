@@ -14,6 +14,7 @@ export const definitions = [
 
 export async function execute(interaction) {
     try {
+        await interaction.deferReply();
         const embed = new EmbedBuilder()
             .setColor(EMBED_THEME.primary)
             .setAuthor({

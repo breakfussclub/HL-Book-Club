@@ -71,6 +71,11 @@ export const definitions = [
 export async function execute(interaction) {
   const subcommand = interaction.options.getSubcommand();
 
+  // Defer reply for all admin commands (ephemeral)
+  if (!interaction.deferred && !interaction.replied) {
+    await interaction.deferReply({ flags: 1 << 6 });
+  }
+
   try {
     switch (subcommand) {
       case "status":
@@ -158,8 +163,8 @@ async function handleStatus(interaction) {
         name: "🔄 Backups",
         value: backupStatus.latestBackup
           ? `${backupStatus.totalBackups} total\nLatest: ${formatDate(
-              backupStatus.latestBackup.created
-            )}`
+            backupStatus.latestBackup.created
+          )}`
           : "No backups yet",
         inline: true,
       },
@@ -229,9 +234,8 @@ async function handleBackups(interaction) {
     .setTitle("📦 Available Backups")
     .setDescription(lines.join("\n"))
     .setFooter({
-      text: `Showing ${Math.min(10, backups.length)} of ${
-        backups.length
-      } backups • Retention: ${config.storage.backupRetention} days`,
+      text: `Showing ${Math.min(10, backups.length)} of ${backups.length
+        } backups • Retention: ${config.storage.backupRetention} days`,
     });
 
   await interaction.editReply({ embeds: [embed] });
